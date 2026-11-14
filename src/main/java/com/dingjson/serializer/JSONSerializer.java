@@ -56,7 +56,12 @@ public final class JSONSerializer {
     }
 
     /** Cached declared fields (non-static, non-transient), subclass-first order. */
-    private static final Map<Class<?>, FieldInfo[]> FIELD_CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<FieldInfo[]> FIELD_CACHE = new ClassValue<FieldInfo[]>() {
+        @Override
+        protected FieldInfo[] computeValue(Class<?> type) {
+            return discoverFields(type);
+        }
+    };
 
     /**
      * A cached bean field with its {@link Unsafe} offset for direct access
@@ -71,11 +76,13 @@ public final class JSONSerializer {
         final String format;          // @JSONField(format) date pattern
         final Field field;          // fallback accessor
         final long offset;          // unsafe offset (valid when UnsafeFields.AVAILABLE)
+        final int kind;             // precomputed primitive kind (see kindOf)
 
         FieldInfo(Field field) {
             this.field = field;
             this.name = field.getName();
             this.type = field.getType();
+            this.kind = kindOf(field.getType());
             com.dingjson.annotation.JSONField jf = field.getAnnotation(com.dingjson.annotation.JSONField.class);
             this.jsonName = (jf != null && !jf.name().isEmpty()) ? jf.name() : field.getName();
             this.serializable = jf == null || jf.serialize();
@@ -378,7 +385,7 @@ public final class JSONSerializer {
             if (!f.serializable) continue;
             Object preRead = null;
             boolean preReadValid = false;
-            if (skipNulls && kindOf(f.type) == KIND_REF) {
+            if (skipNulls && f.kind == KIND_REF) {
                 // Read reference fields exactly once: skip when null, reuse the
                 // value below so the field is not read twice. Primitives can
                 // never be null, so they stay on the no-boxing typed path.
@@ -418,7 +425,7 @@ public final class JSONSerializer {
         }
         if (UnsafeFields.AVAILABLE) {
             try {
-                switch (kindOf(f.type)) {
+                switch (f.kind) {
                     case KIND_INT:     sb.append(UnsafeFields.getInt(bean, f.offset)); return;
                     case KIND_LONG:    sb.append(UnsafeFields.getLong(bean, f.offset)); return;
                     case KIND_DOUBLE: {
@@ -463,7 +470,7 @@ public final class JSONSerializer {
     private static Object getFieldValue(Object bean, FieldInfo f) {
         if (UnsafeFields.AVAILABLE) {
             try {
-                switch (kindOf(f.type)) {
+                switch (f.kind) {
                     case KIND_INT:     return UnsafeFields.getInt(bean, f.offset);
                     case KIND_LONG:    return UnsafeFields.getLong(bean, f.offset);
                     case KIND_DOUBLE:  return UnsafeFields.getDouble(bean, f.offset);
@@ -693,7 +700,7 @@ public final class JSONSerializer {
             if (!f.serializable) continue;
             Object preRead = null;
             boolean preReadValid = false;
-            if (skipNulls && kindOf(f.type) == KIND_REF) {
+            if (skipNulls && f.kind == KIND_REF) {
                 preRead = getFieldValue(bean, f);
                 preReadValid = true;
                 if (preRead == null) continue;
@@ -803,13 +810,7 @@ public final class JSONSerializer {
      * behavior. Fields are cached per class and made accessible once.
      */
     private static FieldInfo[] fieldsOf(Class<?> clazz) {
-        FieldInfo[] cached = FIELD_CACHE.get(clazz);
-        if (cached != null) {
-            return cached;
-        }
-        // computeIfAbsent keeps the discovery (including setAccessible) atomic
-        // per class — concurrent callers can no longer build FieldInfo twice.
-        return FIELD_CACHE.computeIfAbsent(clazz, JSONSerializer::discoverFields);
+        return FIELD_CACHE.get(clazz);
     }
 
     private static FieldInfo[] discoverFields(Class<?> clazz) {
@@ -829,7 +830,18 @@ public final class JSONSerializer {
 
     // ── Streaming deserialization (JSONReader → bean, no tree) ────
 
-    private static final Map<Class<?>, Map<String, FieldInfo>> FIELD_MAP_CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<Map<String, FieldInfo>> FIELD_MAP_CACHE =
+            new ClassValue<Map<String, FieldInfo>>() {
+                @Override
+                protected Map<String, FieldInfo> computeValue(Class<?> type) {
+                    Map<String, FieldInfo> map = new HashMap<>();
+                    for (FieldInfo f : fieldsOf(type)) {
+                        map.put(f.jsonName, f);
+                        map.put(f.jsonName.toLowerCase(Locale.ROOT), f); // case-insensitive fallback
+                    }
+                    return map;
+                }
+            };
 
     /**
      * Deserializes a JSON value from a streaming {@link JSONReader} into the
@@ -1043,14 +1055,7 @@ public final class JSONSerializer {
     }
 
     private static Map<String, FieldInfo> fieldMap(Class<?> clazz) {
-        return FIELD_MAP_CACHE.computeIfAbsent(clazz, c -> {
-            Map<String, FieldInfo> map = new HashMap<>();
-            for (FieldInfo f : fieldsOf(c)) {
-                map.put(f.jsonName, f);
-                map.put(f.jsonName.toLowerCase(Locale.ROOT), f); // case-insensitive fallback
-            }
-            return map;
-        });
+        return FIELD_MAP_CACHE.get(clazz);
     }
 
     /**
@@ -1061,7 +1066,7 @@ public final class JSONSerializer {
     private static void putField(Object bean, FieldInfo f, Object value) {
         if (UnsafeFields.AVAILABLE) {
             try {
-                switch (kindOf(f.type)) {
+                switch (f.kind) {
                     case KIND_INT:     UnsafeFields.putInt(bean, f.offset, (Integer) value); return;
                     case KIND_LONG:    UnsafeFields.putLong(bean, f.offset, (Long) value); return;
                     case KIND_DOUBLE:  UnsafeFields.putDouble(bean, f.offset, (Double) value); return;
