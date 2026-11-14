@@ -10,9 +10,12 @@ import java.lang.reflect.Field;
  * a hand-written bytecode {@code GETFIELD}, which is what fastjson2 generates
  * with ASM).
  * <p>
- * Falls back gracefully: if {@code Unsafe} is unavailable (future JDKs may
- * restrict it), {@link #AVAILABLE} is {@code false} and callers keep using
- * plain reflection — behavior is identical either way.
+ * Falls back gracefully: if {@code Unsafe} is unavailable (it is terminally
+ * deprecated as of JDK 25 and slated for removal), {@link #AVAILABLE} is
+ * {@code false} and callers keep using plain reflection — behavior is identical
+ * either way. Set {@code -Ddingjson.unsafe=false} to force the fallback; the
+ * build re-runs the whole test suite that way (surefire execution
+ * {@code reflection-fallback}) so the two paths cannot drift apart.
  */
 final class UnsafeFields {
 
@@ -29,7 +32,7 @@ final class UnsafeFields {
             // Unsafe unavailable — callers fall back to reflection
         }
         UNSAFE = u;
-        AVAILABLE = u != null;
+        AVAILABLE = u != null && !"false".equals(System.getProperty("dingjson.unsafe"));
     }
 
     private UnsafeFields() {

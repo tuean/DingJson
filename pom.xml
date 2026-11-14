@@ -169,6 +169,29 @@
 
 
 
+            <!-- Run the suite twice: once at full speed (Unsafe field access),
+                 once forcing the reflection fallback, so the paths stay equal. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <goals><goal>test</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>reflection-fallback</id>
+                        <goals><goal>test</goal></goals>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <dingjson.unsafe>false</dingjson.unsafe>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
             <!-- Checkstyle for code quality -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
