@@ -183,7 +183,7 @@ public final class JSONSerializer {
         if (value == null) {
             sb.append("null");
         } else if (value instanceof String) {
-            sb.append(quote((String) value));
+            appendQuoted(sb, (String) value);
         } else if (value instanceof Number) {
             appendNumber((Number) value, sb);
         } else if (value instanceof Boolean) {
@@ -198,10 +198,10 @@ public final class JSONSerializer {
         } else if (value instanceof Calendar) {
             sb.append(((Calendar) value).getTimeInMillis());
         } else if (value instanceof UUID) {
-            sb.append(quote(value.toString()));
+            appendQuoted(sb, value.toString());
         } else if (value instanceof java.time.temporal.TemporalAccessor) {
             // LocalDate / LocalDateTime / Instant / OffsetDateTime → ISO-8601 string
-            sb.append(quote(value.toString()));
+            appendQuoted(sb, value.toString());
         } else {
             if (depth > MAX_SERIALIZE_DEPTH) {
                 throw new JSONException("Circular reference or nesting too deep: "
@@ -231,7 +231,7 @@ public final class JSONSerializer {
             if (config != null && !config.writeNullFields() && entry.getValue() == null) continue;
             if (!first) sb.append(',');
             first = false;
-            sb.append(quote(jsonKey(entry.getKey())));
+            appendQuoted(sb, jsonKey(entry.getKey()));
             sb.append(':');
             serialize(entry.getValue(), sb, depth, config);
         }
@@ -261,7 +261,7 @@ public final class JSONSerializer {
             if (config != null && !config.writeNullFields() && v == null) continue;
             if (!first) sb.append(',');
             first = false;
-            sb.append(quote(jsonKey(entry.getKey())));
+            appendQuoted(sb, jsonKey(entry.getKey()));
             sb.append(':');
             serialize(v, sb, depth, config);
         }
@@ -356,7 +356,7 @@ public final class JSONSerializer {
             sb.append('[');
             for (int i = 0; i < a.length; i++) {
                 if (i > 0) sb.append(',');
-                sb.append(quote(a[i]));
+                appendQuoted(sb, a[i]);
             }
             sb.append(']');
         } else {
@@ -388,7 +388,7 @@ public final class JSONSerializer {
             }
             if (!first) sb.append(',');
             first = false;
-            sb.append(quote(f.jsonName));
+            appendQuoted(sb, f.jsonName);
             sb.append(':');
             writeFieldValue(bean, f, preRead, preReadValid, sb, depth, config);
         }
@@ -412,7 +412,7 @@ public final class JSONSerializer {
             if (v == null) {
                 sb.append("null");
             } else {
-                sb.append(quote(dateFormatter(pattern).format(((Date) v).toInstant())));
+                appendQuoted(sb, dateFormatter(pattern).format(((Date) v).toInstant()));
             }
             return;
         }
@@ -551,7 +551,7 @@ public final class JSONSerializer {
         if (value == null) {
             sb.append("null");
         } else if (value instanceof String) {
-            sb.append(quote((String) value));
+            appendQuoted(sb, (String) value);
         } else if (value instanceof Number) {
             appendNumber((Number) value, sb);
         } else if (value instanceof Boolean) {
@@ -564,10 +564,10 @@ public final class JSONSerializer {
         } else if (value instanceof Calendar) {
             sb.append(((Calendar) value).getTimeInMillis());
         } else if (value instanceof UUID) {
-            sb.append(quote(value.toString()));
+            appendQuoted(sb, value.toString());
         } else if (value instanceof java.time.temporal.TemporalAccessor) {
             // LocalDate / LocalDateTime / Instant / OffsetDateTime → ISO-8601 string
-            sb.append(quote(value.toString()));
+            appendQuoted(sb, value.toString());
         } else {
             if (depth > MAX_SERIALIZE_DEPTH) {
                 throw new JSONException("Circular reference or nesting too deep: "
@@ -613,7 +613,8 @@ public final class JSONSerializer {
             hasField = true;
             sb.append('\n');
             appendIndent(sb, indent + 2);
-            sb.append(quote(jsonKey(entry.getKey()))).append(": ");
+            appendQuoted(sb, jsonKey(entry.getKey()));
+            sb.append(": ");
             prettySerialize(entry.getValue(), sb, indent + 2, depth, config);
             sb.append(',');
         }
@@ -654,7 +655,8 @@ public final class JSONSerializer {
             hasField = true;
             sb.append('\n');
             appendIndent(sb, indent + 2);
-            sb.append(quote(jsonKey(entry.getKey()))).append(": ");
+            appendQuoted(sb, jsonKey(entry.getKey()));
+            sb.append(": ");
             prettySerialize(entry.getValue(), sb, indent + 2, depth, config);
             sb.append(',');
         }
@@ -699,7 +701,8 @@ public final class JSONSerializer {
             hasField = true;
             sb.append('\n');
             appendIndent(sb, indent + 2);
-            sb.append(quote(f.jsonName)).append(": ");
+            appendQuoted(sb, f.jsonName);
+            sb.append(": ");
             writeFieldValue(bean, f, preRead, preReadValid, sb, depth, config);
             sb.append(',');
         }
@@ -726,7 +729,19 @@ public final class JSONSerializer {
      * the switch cost. No {@code String.format} allocation on the hot path.
      */
     static String quote(String s) {
+        // Only callers that need a standalone String use this (rare). Hot paths
+        // hand the output builder to appendQuoted and allocate nothing extra.
         StringBuilder sb = new StringBuilder(s.length() + 2);
+        appendQuoted(sb, s);
+        return sb.toString();
+    }
+
+    /**
+     * Quotes a string straight into the output builder — no intermediate
+     * {@code StringBuilder} + {@code String} per value, which was the single
+     * largest allocation source of tree/bean serialization.
+     */
+    static void appendQuoted(StringBuilder sb, String s) {
         sb.append('"');
         final int len = s.length();
         int i = 0;
@@ -778,7 +793,6 @@ public final class JSONSerializer {
             }
         }
         sb.append('"');
-        return sb.toString();
     }
 
     // ── Bean field discovery (cached) ──────────────────────────────

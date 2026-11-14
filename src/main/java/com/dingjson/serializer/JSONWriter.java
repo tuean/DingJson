@@ -84,7 +84,7 @@ public final class JSONWriter {
         if (!first[depth]) {
             sb.append(',');
         }
-        sb.append(JSONSerializer.quote(key));
+        JSONSerializer.appendQuoted(sb, key);
         sb.append(':');
         first[depth] = false;
         state[depth] = 3; // awaiting the value for this key (no extra stack level)
@@ -95,7 +95,7 @@ public final class JSONWriter {
 
     public JSONWriter value(String v) {
         beforeValue(0);
-        sb.append(JSONSerializer.quote(v));
+        JSONSerializer.appendQuoted(sb, v);
         return this;
     }
 
