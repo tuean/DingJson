@@ -74,7 +74,7 @@ public final class JSONParser {
         char c = tokener.nextNonWhitespace();
         switch (c) {
             case '"':
-                tokener.readString();
+                tokener.skipString();
                 return;
             case '{':
                 skipObject(depth);
@@ -96,8 +96,8 @@ public final class JSONParser {
                 return;
             default:
                 if (c == '-' || (c >= '0' && c <= '9')) {
-                    tokener.backup(1); // hand the lookahead digit back to readNumber
-                    tokener.readNumber();
+                    tokener.backup(1); // hand the lookahead digit back to the number scanner
+                    tokener.skipNumber();
                     return;
                 }
                 throw new JSONException("Unexpected character '" + c + "' at position "
@@ -119,7 +119,7 @@ public final class JSONParser {
             if (maxKeys > 0 && keys++ >= maxKeys) {
                 throw new JSONException("Object size exceeds maximum allowed " + maxKeys);
             }
-            tokener.readString();
+            tokener.skipString();
             if (tokener.nextNonWhitespace() != ':') {
                 throw new JSONException("Expected ':' after key in object at position " + tokener.getPosition());
             }

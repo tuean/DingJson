@@ -191,6 +191,49 @@ public final class JSONTokener {
         return decodeEscapes(src, len, this.pos, b);
     }
 
+    /**
+     * Skips a string without materializing it — the validation counterpart of
+     * {@link #readString()}, used by {@link JSONParser#skipValue()} and
+     * {@code DingJson.isValid}. Same scan, same escape validation, same length
+     * limit; the (discarded) String is only built when the string actually
+     * contains a backslash, so escape-free documents allocate nothing.
+     */
+    void skipString() {
+        final char[] src = this.source;
+        final int len = this.length;
+        int p = this.pos;
+
+        int limit = Math.min(len, p + 16);
+        while (p < limit) {
+            char c = src[p];
+            if (c == '"') {
+                checkStringLength(p - this.pos);
+                this.pos = p + 1;
+                return;
+            }
+            if (c == '\\') {
+                decodeEscapes(src, len, this.pos, p); // validates; result discarded
+                return;
+            }
+            p++;
+        }
+        if (p >= len) {
+            throw new JSONException("Unterminated string");
+        }
+
+        int q = this.sourceString.indexOf('"', p);
+        int b = this.sourceString.indexOf('\\', p);
+        if (b < 0 || (q >= 0 && q < b)) {
+            if (q < 0) {
+                throw new JSONException("Unterminated string");
+            }
+            checkStringLength(q - this.pos);
+            this.pos = q + 1;
+            return;
+        }
+        decodeEscapes(src, len, this.pos, b);
+    }
+
     /** Escape-decoding slow path, starting at the first backslash {@code b}. */
     private String decodeEscapes(char[] src, int len, int start, int b) {
         StringBuilder sb = new StringBuilder(b - start + 16);
@@ -468,6 +511,80 @@ public final class JSONTokener {
         String raw = new String(src, start, p - start);
         this.pos = p;
         return raw;
+    }
+
+    /**
+     * Validates and skips a JSON number without boxing it — the validation
+     * counterpart of {@link #readNumber()}. Grammar and range rules are
+     * identical (integer digits that overflow {@code long} are still rejected,
+     * decimal/scientific values that overflow {@code double} stay valid).
+     */
+    void skipNumber() {
+        final char[] src = this.source;
+        final int len = this.length;
+        final int start = this.pos;
+        int p = start;
+
+        boolean negative = false;
+        if (p < len && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+
+        long intVal = 0;
+        boolean overflow = false;
+        if (p < len && src[p] == '0') {
+            p++;
+        } else {
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number at position " + start);
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                int digit = src[p] - '0';
+                if (negative) {
+                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
+                        overflow = true;
+                    } else {
+                        intVal = intVal * 10 - digit;
+                    }
+                } else {
+                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
+                        overflow = true;
+                    } else {
+                        intVal = intVal * 10 + digit;
+                    }
+                }
+                p++;
+            }
+        }
+
+        if (p < len && src[p] == '.') {
+            p++;
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number: expected digit after decimal point");
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                p++;
+            }
+        }
+
+        if (p < len && (src[p] == 'e' || src[p] == 'E')) {
+            p++;
+            if (p < len && (src[p] == '+' || src[p] == '-')) {
+                p++;
+            }
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number: expected digit in exponent");
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                p++;
+            }
+        }
+
+        if (overflow) {
+            throw new JSONException("Invalid number: value out of range");
+        }
+        this.pos = p;
     }
 
     /**
