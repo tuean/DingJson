@@ -277,63 +277,17 @@ public final class JSONReader {
 
     // ── Typed arrays (zero boxing) ────────────────────────────────
 
-    /** Doubles a growth size with overflow protection (only reachable with unlimited size config). */
+    /**
+     * Doubles a growth size with overflow protection (only reachable with
+     * unlimited size config). Copying on growth is cheaper than a pre-scan to
+     * size the array exactly: the growth chain copies ~2x the final array
+     * (memcpy), while counting elements first would scan the whole input twice.
+     */
     private static int grow(int n) {
         if (n <= 0 || n > (Integer.MAX_VALUE - 8) / 2) {
             throw new JSONException("Array too large");
         }
         return n * 2;
-    }
-
-    /**
-     * Counts the elements that follow {@code p} (position just after the opening
-     * bracket) so the typed-array readers can size their result exactly instead
-     * of doubling and copying. Only a capacity <em>hint</em>: a miscount costs a
-     * resize, never correctness — the growth path is still in place.
-     */
-    private static int countElements(char[] src, int len, int p) {
-        int count = 0;
-        int depth = 0;
-        boolean expectValue = true;
-        while (p < len) {
-            char c = src[p];
-            if (c == '"') {
-                p++;
-                while (p < len) {
-                    char d = src[p];
-                    if (d == '\\') {
-                        p += 2;
-                        continue;
-                    }
-                    if (d == '"') {
-                        break;
-                    }
-                    p++;
-                }
-                if (depth == 0 && expectValue) {
-                    count++;
-                    expectValue = false;
-                }
-            } else if (c == '[' || c == '{') {
-                if (depth == 0 && expectValue) {
-                    count++;
-                    expectValue = false;
-                }
-                depth++;
-            } else if (c == ']' || c == '}') {
-                if (depth == 0) {
-                    return count;
-                }
-                depth--;
-            } else if (c == ',' && depth == 0) {
-                expectValue = true;
-            } else if (depth == 0 && expectValue && c != ' ' && c != '\t' && c != '\n' && c != '\r') {
-                count++;
-                expectValue = false;
-            }
-            p++;
-        }
-        return count;
     }
 
     /**
@@ -351,8 +305,7 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        int hint = countElements(src, len, p);
-        int[] arr = new int[hint > 0 ? hint : 16];
+        int[] arr = new int[16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
@@ -492,8 +445,7 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        int hint = countElements(src, len, p);
-        long[] arr = new long[hint > 0 ? hint : 16];
+        long[] arr = new long[16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
@@ -585,8 +537,7 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        int hint = countElements(src, len, p);
-        double[] arr = new double[hint > 0 ? hint : 16];
+        double[] arr = new double[16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
@@ -675,8 +626,7 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        int hint = countElements(src, len, p);
-        String[] arr = new String[hint > 0 ? hint : 16];
+        String[] arr = new String[16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
