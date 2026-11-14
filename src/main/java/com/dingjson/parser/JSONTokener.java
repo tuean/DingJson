@@ -329,6 +329,105 @@ public final class JSONTokener {
 
     // ── Number scanning ───────────────────────────────────────────
 
+    /** Powers of ten that are exactly representable as a double. */
+    private static final double[] POW10 = new double[23];
+
+    static {
+        double v = 1;
+        for (int i = 0; i < POW10.length; i++) {
+            POW10[i] = v;
+            v *= 10;
+        }
+    }
+
+    /**
+     * Converts an already grammar-validated number literal to a double without
+     * allocating the intermediate String that {@code Double.parseDouble} needs.
+     * <p>
+     * Correctly rounded, not merely "close": when the mantissa has at most 15
+     * significant digits (exactly representable as a long) and the decimal
+     * exponent is within ±22 (where 10^n is exact), a single multiply or divide
+     * rounds the exact decimal value once — which is exactly what the JDK's
+     * correctly-rounded parser produces. Anything else (longer mantissas,
+     * larger exponents) returns {@link Double#NaN} so the caller falls back to
+     * {@code Double.parseDouble}. NaN is a safe sentinel because JSON has no
+     * NaN literal, and the grammar is validated before this runs.
+     */
+    static double fastDouble(char[] src, int from, int to) {
+        int p = from;
+        boolean negative = false;
+        if (p < to && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+        long mantissa = 0;
+        int digits = 0;
+        int fracDigits = 0;
+        boolean seenDot = false;
+        while (p < to) {
+            char c = src[p];
+            if (c == '.') {
+                seenDot = true;
+                p++;
+                continue;
+            }
+            if (c == 'e' || c == 'E') {
+                break;
+            }
+            if (digits >= 15) {
+                return Double.NaN; // mantissa no longer exactly representable
+            }
+            mantissa = mantissa * 10 + (c - '0');
+            digits++;
+            if (seenDot) {
+                fracDigits++;
+            }
+            p++;
+        }
+
+        int exp = 0;
+        if (p < to) { // e / E
+            p++;
+            boolean expNegative = false;
+            if (p < to && src[p] == '+') {
+                p++;
+            } else if (p < to && src[p] == '-') {
+                expNegative = true;
+                p++;
+            }
+            for (; p < to; p++) {
+                exp = exp * 10 + (src[p] - '0');
+                if (exp > 30) {
+                    return Double.NaN; // far outside the exact power-of-ten range
+                }
+            }
+            if (expNegative) {
+                exp = -exp;
+            }
+        }
+
+        int scale = exp - fracDigits;
+        if (mantissa == 0) {
+            return negative ? -0.0 : 0.0;
+        }
+        double result;
+        if (scale == 0) {
+            result = (double) mantissa;
+        } else if (scale > 0) {
+            if (scale > 22) {
+                return Double.NaN;
+            }
+            result = (double) mantissa * POW10[scale];
+        } else {
+            if (scale < -22) {
+                return Double.NaN;
+            }
+            result = (double) mantissa / POW10[-scale];
+        }
+        return negative ? -result : result;
+    }
+
+
     /**
      * Reads a JSON number (integer or decimal, possibly negative, possibly
      * scientific notation).
@@ -425,13 +524,18 @@ public final class JSONTokener {
             return intVal;
         }
 
-        // Decimal / scientific — single allocation, JDK-optimized parser.
+        // Decimal / scientific — fast path first (no String allocation),
+        // falling back to the JDK parser for long mantissas / big exponents.
+        double d = fastDouble(src, start, p);
+        if (!Double.isNaN(d)) {
+            return d;
+        }
+        String text = new String(src, start, p - start);
+        d = Double.parseDouble(text);
         // Values that overflow double come back as ±Infinity and would then
         // serialize as null (data loss) — keep full precision in a BigDecimal
         // instead (Gson-style). The strict scalar double path (readDouble)
         // rejects these explicitly.
-        String text = new String(src, start, p - start);
-        double d = Double.parseDouble(text);
         if (Double.isInfinite(d)) {
             try {
                 return new java.math.BigDecimal(text);

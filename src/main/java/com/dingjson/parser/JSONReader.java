@@ -286,6 +286,57 @@ public final class JSONReader {
     }
 
     /**
+     * Counts the elements that follow {@code p} (position just after the opening
+     * bracket) so the typed-array readers can size their result exactly instead
+     * of doubling and copying. Only a capacity <em>hint</em>: a miscount costs a
+     * resize, never correctness — the growth path is still in place.
+     */
+    private static int countElements(char[] src, int len, int p) {
+        int count = 0;
+        int depth = 0;
+        boolean expectValue = true;
+        while (p < len) {
+            char c = src[p];
+            if (c == '"') {
+                p++;
+                while (p < len) {
+                    char d = src[p];
+                    if (d == '\\') {
+                        p += 2;
+                        continue;
+                    }
+                    if (d == '"') {
+                        break;
+                    }
+                    p++;
+                }
+                if (depth == 0 && expectValue) {
+                    count++;
+                    expectValue = false;
+                }
+            } else if (c == '[' || c == '{') {
+                if (depth == 0 && expectValue) {
+                    count++;
+                    expectValue = false;
+                }
+                depth++;
+            } else if (c == ']' || c == '}') {
+                if (depth == 0) {
+                    return count;
+                }
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                expectValue = true;
+            } else if (depth == 0 && expectValue && c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                count++;
+                expectValue = false;
+            }
+            p++;
+        }
+        return count;
+    }
+
+    /**
      * Reads an array of integers directly into a freshly allocated {@code int[]}.
      * No boxing, no intermediate tree. Elements must be integers
      * (decimal/scientific notation is rejected).
@@ -300,7 +351,8 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        int[] arr = new int[16];
+        int hint = countElements(src, len, p);
+        int[] arr = new int[hint > 0 ? hint : 16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
@@ -440,7 +492,8 @@ public final class JSONReader {
         final int len = tokener.getLength();
         final int maxElems = config != null ? config.maxArraySize() : 0;
         int p = tokener.getPosition();
-        long[] arr = new long[16];
+        int hint = countElements(src, len, p);
+        long[] arr = new long[hint > 0 ? hint : 16];
         int n = 0;
         while (true) {
             p = skipWs(src, len, p);
@@ -519,39 +572,70 @@ public final class JSONReader {
         return n == arr.length ? arr : Arrays.copyOf(arr, n);
     }
 
-    /** Reads an array of doubles directly into a freshly allocated {@code double[]}. */
+    /**
+     * Reads an array of doubles directly into a freshly allocated
+     * {@code double[]}. The grammar is validated by {@link JSONTokener#skipNumber}
+     * and converted by the allocation-free {@link JSONTokener#fastDouble} fast
+     * path; only long mantissas / big exponents fall back to
+     * {@code Double.parseDouble}.
+     */
     public double[] readDoubleArray() {
         expect('[');
-        double[] arr = new double[16];
+        final char[] src = tokener.getBuffer();
+        final int len = tokener.getLength();
+        final int maxElems = config != null ? config.maxArraySize() : 0;
+        int p = tokener.getPosition();
+        int hint = countElements(src, len, p);
+        double[] arr = new double[hint > 0 ? hint : 16];
         int n = 0;
-        char c = tokener.nextNonWhitespace();
-        if (c == ']') {
-            return new double[0];
-        }
-        tokener.backup(1);
         while (true) {
-            Number num = nextNumber();
-            if (num instanceof java.math.BigDecimal) {
-                throw new JSONException("Number out of range for double at position "
-                        + (tokener.getPosition() - 1));
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
             }
-            double v = num.doubleValue();
-            if (config != null && config.maxArraySize() > 0 && n >= config.maxArraySize()) {
-                throw new JSONException("Array size exceeds maximum allowed " + config.maxArraySize());
+            if (src[p] == ']') {
+                p++;
+                break;
+            }
+            final int tokenStart = p;
+            tokener.setPosition(p);
+            tokener.skipNumber();
+            final int tokenEnd = tokener.getPosition();
+            double v = JSONTokener.fastDouble(src, tokenStart, tokenEnd);
+            if (Double.isNaN(v)) {
+                v = Double.parseDouble(new String(src, tokenStart, tokenEnd - tokenStart));
+                if (Double.isInfinite(v)) {
+                    tokener.setPosition(tokenStart);
+                    throw new JSONException("Number out of range for double at position " + tokenStart);
+                }
+            }
+            if (maxElems > 0 && n >= maxElems) {
+                tokener.setPosition(tokenStart);
+                throw new JSONException("Array size exceeds maximum allowed " + maxElems);
             }
             if (n == arr.length) {
                 arr = Arrays.copyOf(arr, grow(n));
             }
             arr[n++] = v;
-            c = tokener.nextNonWhitespace();
-            if (c == ']') {
-                return n == arr.length ? arr : Arrays.copyOf(arr, n);
+
+            p = skipWs(src, len, tokenEnd);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
             }
-            if (c != ',') {
-                throw new JSONException("Expected ',' or ']' in array at position "
-                        + (tokener.getPosition() - 1));
+            if (src[p] == ']') {
+                p++;
+                break;
             }
+            if (src[p] != ',') {
+                tokener.setPosition(p);
+                throw new JSONException("Expected ',' or ']' in array at position " + p);
+            }
+            p++;
         }
+        tokener.setPosition(p);
+        return n == arr.length ? arr : Arrays.copyOf(arr, n);
     }
 
     /** Reads an array of booleans directly into a freshly allocated {@code boolean[]}. */
@@ -587,30 +671,55 @@ public final class JSONReader {
     /** Reads an array of strings directly into a freshly allocated {@code String[]}. */
     public String[] readStringArray() {
         expect('[');
-        String[] arr = new String[16];
+        final char[] src = tokener.getBuffer();
+        final int len = tokener.getLength();
+        final int maxElems = config != null ? config.maxArraySize() : 0;
+        int p = tokener.getPosition();
+        int hint = countElements(src, len, p);
+        String[] arr = new String[hint > 0 ? hint : 16];
         int n = 0;
-        char c = tokener.nextNonWhitespace();
-        if (c == ']') {
-            return new String[0];
-        }
-        tokener.backup(1);
         while (true) {
-            String v = readString();
-            if (config != null && config.maxArraySize() > 0 && n >= config.maxArraySize()) {
-                throw new JSONException("Array size exceeds maximum allowed " + config.maxArraySize());
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
+            }
+            if (src[p] == ']') {
+                p++;
+                break;
+            }
+            if (src[p] != '"') {
+                tokener.setPosition(p);
+                throw new JSONException("Expected string but got '" + src[p] + "' at position " + p);
+            }
+            tokener.setPosition(p + 1);
+            String v = tokener.readString();
+            p = tokener.getPosition();
+            if (maxElems > 0 && n >= maxElems) {
+                tokener.setPosition(p);
+                throw new JSONException("Array size exceeds maximum allowed " + maxElems);
             }
             if (n == arr.length) {
                 arr = Arrays.copyOf(arr, grow(n));
             }
             arr[n++] = v;
-            c = tokener.nextNonWhitespace();
-            if (c == ']') {
-                return n == arr.length ? arr : Arrays.copyOf(arr, n);
+
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
             }
-            if (c != ',') {
-                throw new JSONException("Expected ',' or ']' in array at position "
-                        + (tokener.getPosition() - 1));
+            if (src[p] == ']') {
+                p++;
+                break;
             }
+            if (src[p] != ',') {
+                tokener.setPosition(p);
+                throw new JSONException("Expected ',' or ']' in array at position " + p);
+            }
+            p++;
         }
+        tokener.setPosition(p);
+        return n == arr.length ? arr : Arrays.copyOf(arr, n);
     }
 }
