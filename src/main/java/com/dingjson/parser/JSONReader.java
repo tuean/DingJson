@@ -289,64 +289,234 @@ public final class JSONReader {
      * Reads an array of integers directly into a freshly allocated {@code int[]}.
      * No boxing, no intermediate tree. Elements must be integers
      * (decimal/scientific notation is rejected).
+     * <p>
+     * The whole loop runs on the tokener's backing buffer with no per-element
+     * method calls: at ~5-7 chars per element, the call/whitespace overhead of
+     * the generic {@code nextIntScalar()} path dominated the digit scan itself.
      */
     public int[] readIntArray() {
         expect('[');
+        final char[] src = tokener.getBuffer();
+        final int len = tokener.getLength();
+        final int maxElems = config != null ? config.maxArraySize() : 0;
+        int p = tokener.getPosition();
         int[] arr = new int[16];
         int n = 0;
-        char c = tokener.nextNonWhitespace();
-        if (c == ']') {
-            return new int[0];
-        }
-        tokener.backup(1);
         while (true) {
-            long v = nextIntScalar();
-            if (config != null && config.maxArraySize() > 0 && n >= config.maxArraySize()) {
-                throw new JSONException("Array size exceeds maximum allowed " + config.maxArraySize());
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
+            }
+            if (src[p] == ']') {
+                p++;
+                break;
+            }
+            final int tokenStart = p;
+            boolean negative = false;
+            if (src[p] == '-') {
+                negative = true;
+                p++;
+            }
+            long val = 0;
+            if (p < len && src[p] == '0') {
+                p++;
+            } else {
+                if (p >= len || src[p] < '0' || src[p] > '9') {
+                    tokener.setPosition(tokenStart);
+                    throw new JSONException("Invalid number at position " + tokenStart);
+                }
+                // Unchecked accumulation: 18 digits always fit in a long, so the
+                // per-digit range test (a divide plus branch) is only paid by the
+                // rare 19+ digit numbers, which rescan themselves below.
+                int digits = 0;
+                while (p < len && src[p] >= '0' && src[p] <= '9') {
+                    val = val * 10 + (src[p] - '0');
+                    p++;
+                    digits++;
+                }
+                if (digits > 18) {
+                    int end = p;
+                    try {
+                        val = checkedInteger(src, tokenStart, end);
+                    } catch (JSONException e) {
+                        tokener.setPosition(tokenStart);
+                        throw e;
+                    }
+                } else if (negative) {
+                    val = -val;
+                }
+            }
+            if (p < len && (src[p] == '.' || src[p] == 'e' || src[p] == 'E')) {
+                tokener.setPosition(tokenStart);
+                throw new JSONException("Expected integer but got a decimal number");
+            }
+            if (maxElems > 0 && n >= maxElems) {
+                tokener.setPosition(tokenStart);
+                throw new JSONException("Array size exceeds maximum allowed " + maxElems);
             }
             if (n == arr.length) {
                 arr = Arrays.copyOf(arr, grow(n));
             }
-            arr[n++] = (int) v;
-            c = tokener.nextNonWhitespace();
-            if (c == ']') {
-                return n == arr.length ? arr : Arrays.copyOf(arr, n);
+            arr[n++] = (int) val;
+
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
             }
-            if (c != ',') {
-                throw new JSONException("Expected ',' or ']' in array at position "
-                        + (tokener.getPosition() - 1));
+            if (src[p] == ']') {
+                p++;
+                break;
             }
+            if (src[p] != ',') {
+                tokener.setPosition(p);
+                throw new JSONException("Expected ',' or ']' in array at position " + p);
+            }
+            p++;
         }
+        tokener.setPosition(p);
+        return n == arr.length ? arr : Arrays.copyOf(arr, n);
     }
 
-    /** Reads an array of longs directly into a freshly allocated {@code long[]}. */
+    /**
+     * Range-checked integer scan for values with 19+ digits (the only ones that
+     * can leave the {@code long} range). Negatives accumulate downward so that
+     * {@link Long#MIN_VALUE} — whose magnitude does not fit — stays representable.
+     */
+    private static long checkedInteger(char[] src, int from, int to) {
+        int p = from;
+        boolean negative = false;
+        if (p < to && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+        long val = 0;
+        while (p < to) {
+            int digit = src[p] - '0';
+            if (negative) {
+                if (val < (Long.MIN_VALUE + digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 - digit;
+            } else {
+                if (val > (Long.MAX_VALUE - digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 + digit;
+            }
+            p++;
+        }
+        return val;
+    }
+
+    /** Skips JSON whitespace (space, tab, LF, CR). Other control chars are left for the caller to reject. */
+    private static int skipWs(char[] src, int len, int p) {
+        while (p < len) {
+            char c = src[p];
+            if (c > ' ') {
+                return p;
+            }
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                return p; // not JSON whitespace — caller reports it
+            }
+            p++;
+        }
+        return p;
+    }
+
+    /**
+     * Reads an array of longs directly into a freshly allocated {@code long[]}.
+     * No boxing, no intermediate tree. Elements must be integers
+     * (decimal/scientific notation is rejected).
+     * <p>
+     * The whole loop runs on the tokener's backing buffer with no per-element
+     * method calls: at ~5-7 chars per element, the call/whitespace overhead of
+     * the generic {@code nextIntScalar()} path dominated the digit scan itself.
+     */
     public long[] readLongArray() {
         expect('[');
+        final char[] src = tokener.getBuffer();
+        final int len = tokener.getLength();
+        final int maxElems = config != null ? config.maxArraySize() : 0;
+        int p = tokener.getPosition();
         long[] arr = new long[16];
         int n = 0;
-        char c = tokener.nextNonWhitespace();
-        if (c == ']') {
-            return new long[0];
-        }
-        tokener.backup(1);
         while (true) {
-            long v = nextIntScalar();
-            if (config != null && config.maxArraySize() > 0 && n >= config.maxArraySize()) {
-                throw new JSONException("Array size exceeds maximum allowed " + config.maxArraySize());
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
+            }
+            if (src[p] == ']') {
+                p++;
+                break;
+            }
+            final int tokenStart = p;
+            boolean negative = false;
+            if (src[p] == '-') {
+                negative = true;
+                p++;
+            }
+            long val = 0;
+            if (p < len && src[p] == '0') {
+                p++;
+            } else {
+                if (p >= len || src[p] < '0' || src[p] > '9') {
+                    tokener.setPosition(tokenStart);
+                    throw new JSONException("Invalid number at position " + tokenStart);
+                }
+                // Unchecked accumulation: 18 digits always fit in a long, so the
+                // per-digit range test (a divide plus branch) is only paid by the
+                // rare 19+ digit numbers, which rescan themselves below.
+                int digits = 0;
+                while (p < len && src[p] >= '0' && src[p] <= '9') {
+                    val = val * 10 + (src[p] - '0');
+                    p++;
+                    digits++;
+                }
+                if (digits > 18) {
+                    int end = p;
+                    try {
+                        val = checkedInteger(src, tokenStart, end);
+                    } catch (JSONException e) {
+                        tokener.setPosition(tokenStart);
+                        throw e;
+                    }
+                } else if (negative) {
+                    val = -val;
+                }
+            }
+            if (p < len && (src[p] == '.' || src[p] == 'e' || src[p] == 'E')) {
+                tokener.setPosition(tokenStart);
+                throw new JSONException("Expected integer but got a decimal number");
+            }
+            if (maxElems > 0 && n >= maxElems) {
+                tokener.setPosition(tokenStart);
+                throw new JSONException("Array size exceeds maximum allowed " + maxElems);
             }
             if (n == arr.length) {
                 arr = Arrays.copyOf(arr, grow(n));
             }
-            arr[n++] = v;
-            c = tokener.nextNonWhitespace();
-            if (c == ']') {
-                return n == arr.length ? arr : Arrays.copyOf(arr, n);
+            arr[n++] = val;
+
+            p = skipWs(src, len, p);
+            if (p >= len) {
+                tokener.setPosition(p);
+                throw new JSONException("Unexpected end of input");
             }
-            if (c != ',') {
-                throw new JSONException("Expected ',' or ']' in array at position "
-                        + (tokener.getPosition() - 1));
+            if (src[p] == ']') {
+                p++;
+                break;
             }
+            if (src[p] != ',') {
+                tokener.setPosition(p);
+                throw new JSONException("Expected ',' or ']' in array at position " + p);
+            }
+            p++;
         }
+        tokener.setPosition(p);
+        return n == arr.length ? arr : Arrays.copyOf(arr, n);
     }
 
     /** Reads an array of doubles directly into a freshly allocated {@code double[]}. */

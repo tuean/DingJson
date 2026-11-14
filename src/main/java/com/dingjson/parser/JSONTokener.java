@@ -76,6 +76,21 @@ public final class JSONTokener {
         return pos;
     }
 
+    /** Input length (the backing buffer carries one extra sentinel char). */
+    int getLength() {
+        return length;
+    }
+
+    /** Backing buffer, for callers that scan it directly (streaming array paths). */
+    char[] getBuffer() {
+        return source;
+    }
+
+    /** Sets the read position after a caller-driven scan of {@link #getBuffer()}. */
+    void setPosition(int p) {
+        this.pos = p;
+    }
+
     /**
      * Rewinds the read position (used when a lookahead character needs to be
      * handed back to the number/keyword parser).
@@ -280,6 +295,38 @@ public final class JSONTokener {
         throw new JSONException("Invalid hex digit in unicode escape: " + c);
     }
 
+    /**
+     * Range-checked integer scan for values with 19+ digits (the only ones that
+     * can leave the {@code long} range). Negatives accumulate downward so that
+     * {@link Long#MIN_VALUE} — whose magnitude does not fit — stays representable.
+     */
+    private long checkedInteger(int from, int to) {
+        final char[] src = this.source;
+        int p = from;
+        boolean negative = false;
+        if (p < to && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+        long val = 0;
+        while (p < to) {
+            int digit = src[p] - '0';
+            if (negative) {
+                if (val < (Long.MIN_VALUE + digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 - digit;
+            } else {
+                if (val > (Long.MAX_VALUE - digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 + digit;
+            }
+            p++;
+        }
+        return val;
+    }
+
     // ── Number scanning ───────────────────────────────────────────
 
     /**
@@ -316,22 +363,23 @@ public final class JSONTokener {
             if (p >= len || src[p] < '0' || src[p] > '9') {
                 throw new JSONException("Invalid number at position " + this.pos);
             }
+            // Unchecked accumulation; 18 digits always fit in a long. Only the
+            // rare 19+ digit integer parts rescan with a per-digit range test.
+            int digits = 0;
             while (p < len && src[p] >= '0' && src[p] <= '9') {
-                int digit = src[p] - '0';
-                if (negative) {
-                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
-                        overflow = true; // keep scanning; reported below
-                    } else {
-                        intVal = intVal * 10 - digit;
-                    }
-                } else {
-                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
-                        overflow = true; // keep scanning; reported below
-                    } else {
-                        intVal = intVal * 10 + digit;
-                    }
-                }
+                intVal = intVal * 10 + (src[p] - '0');
                 p++;
+                digits++;
+            }
+            if (digits > 18) {
+                int end = p;
+                try {
+                    intVal = checkedInteger(start, end);
+                } catch (JSONException e) {
+                    overflow = true; // reported below with the usual message
+                }
+            } else if (negative) {
+                intVal = -intVal;
             }
         }
 
@@ -421,22 +469,21 @@ public final class JSONTokener {
             if (p >= len || src[p] < '0' || src[p] > '9') {
                 throw new JSONException("Invalid number at position " + this.pos);
             }
+            int digits = 0;
             while (p < len && src[p] >= '0' && src[p] <= '9') {
-                int digit = src[p] - '0';
-                if (negative) {
-                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
-                        overflow = true;
-                    } else {
-                        intVal = intVal * 10 - digit;
-                    }
-                } else {
-                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
-                        overflow = true;
-                    } else {
-                        intVal = intVal * 10 + digit;
-                    }
-                }
+                intVal = intVal * 10 + (src[p] - '0');
                 p++;
+                digits++;
+            }
+            if (digits > 18) {
+                int end = p;
+                try {
+                    intVal = checkedInteger(this.pos, end);
+                } catch (JSONException e) {
+                    overflow = true;
+                }
+            } else if (negative) {
+                intVal = -intVal;
             }
         }
 
