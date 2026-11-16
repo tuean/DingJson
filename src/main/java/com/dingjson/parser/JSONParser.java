@@ -42,11 +42,22 @@ public final class JSONParser {
         if (!tokener.hasMore()) {
             throw new JSONException("Empty input");
         }
-        Object value = readValue(0);
-        if (tokener.hasMore()) {
-            throw new JSONException("Unexpected trailing content at position " + tokener.getPosition());
+        try {
+            Object value = readValue(0);
+            if (tokener.hasMore()) {
+                throw new JSONException("Unexpected trailing content at position " + tokener.getPosition());
+            }
+            return value;
+        } catch (StackOverflowError e) {
+            // The depth limit is the primary guard, but it cannot cover every
+            // stack size (containers and virtual threads run on 64-512 KB).
+            // Surface a catchable JSONException instead of an Error.
+            throw new JSONException("Nesting too deep to parse", e);
         }
-        return value;
+    }
+
+    private int maxDepth() {
+        return config != null ? config.maxDepth() : MAX_DEPTH;
     }
 
     /**
@@ -64,17 +75,21 @@ public final class JSONParser {
      * {@link JSONReader#skipValue()}.
      */
     public void skipValue() {
-        skipValue(0);
+        try {
+            skipValue(0);
+        } catch (StackOverflowError e) {
+            throw new JSONException("Nesting too deep to skip", e);
+        }
     }
 
     private void skipValue(int depth) {
-        if (depth > MAX_DEPTH) {
-            throw new JSONException("Exceeded maximum nesting depth of " + MAX_DEPTH);
+        if (depth > maxDepth()) {
+            throw new JSONException("Exceeded maximum nesting depth of " + maxDepth());
         }
         char c = tokener.nextNonWhitespace();
         switch (c) {
             case '"':
-                tokener.readString();
+                tokener.skipString();
                 return;
             case '{':
                 skipObject(depth);
@@ -96,8 +111,8 @@ public final class JSONParser {
                 return;
             default:
                 if (c == '-' || (c >= '0' && c <= '9')) {
-                    tokener.backup(1); // hand the lookahead digit back to readNumber
-                    tokener.readNumber();
+                    tokener.backup(1); // hand the lookahead digit back to the number scanner
+                    tokener.skipNumber();
                     return;
                 }
                 throw new JSONException("Unexpected character '" + c + "' at position "
@@ -119,7 +134,7 @@ public final class JSONParser {
             if (maxKeys > 0 && keys++ >= maxKeys) {
                 throw new JSONException("Object size exceeds maximum allowed " + maxKeys);
             }
-            tokener.readString();
+            tokener.skipString();
             if (tokener.nextNonWhitespace() != ':') {
                 throw new JSONException("Expected ':' after key in object at position " + tokener.getPosition());
             }
@@ -161,8 +176,8 @@ public final class JSONParser {
     }
 
     private Object readValue(int depth) {
-        if (depth > MAX_DEPTH) {
-            throw new JSONException("Exceeded maximum nesting depth of " + MAX_DEPTH);
+        if (depth > maxDepth()) {
+            throw new JSONException("Exceeded maximum nesting depth of " + maxDepth());
         }
         char c = tokener.nextNonWhitespace();
         switch (c) {

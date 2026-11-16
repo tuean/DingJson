@@ -133,7 +133,9 @@ public class DingJsonConcurrencyTest {
                         if (!json.contains("\"v\":")) throw new AssertionError("bad: " + json);
                     }
                 } catch (Throwable e) {
-                    errors.incrementAndGet();
+                    if (errors.getAndIncrement() == 0) {
+                        e.printStackTrace(); // first failure only: the count alone says nothing
+                    }
                 } finally {
                     done.countDown();
                 }

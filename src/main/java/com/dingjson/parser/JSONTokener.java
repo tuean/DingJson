@@ -52,48 +52,43 @@ public final class JSONTokener {
         this.source = buf;
         this.length = len;
         this.pos = 0;
-        validateControlChars();
     }
 
     /**
-     * Rejects raw control characters (0x00-0x1F) inside strings, as required by
-     * RFC 8259 §7. Only the inside of strings needs this check — control
-     * characters outside strings are rejected later by
-     * {@link #nextNonWhitespace()}. String interiors are located with the
-     * SIMD-optimized {@code String.indexOf}, so inputs with few strings (e.g.
-     * large numeric arrays) cost almost nothing here. Escaped forms (\" \\
-     * \\uXXXX ...) never trip the check because the escaped char is skipped
-     * right after the backslash.
+     * Rejects raw control characters (0x00-0x1F) inside a string, as required by
+     * RFC 8259 §7. Checked while the string is scanned rather than in a separate
+     * pass over the whole document: the pre-pass cost a second scan of the input
+     * (~25% of parse time on string-dense input) to protect an invariant whose
+     * check is a single branch on a character already in hand. Control
+     * characters outside strings are still rejected — {@link #nextNonWhitespace()}
+     * hands them back and the parser reports them.
      */
-    private void validateControlChars() {
-        final int len = this.length;
-        int i = 0;
-        while (i < len) {
-            int q = this.sourceString.indexOf('"', i);
-            if (q < 0) {
-                return; // no more strings
+    private void checkControlChars(int from, int to) {
+        final char[] src = this.source;
+        for (int i = from; i < to; i++) {
+            if (src[i] < 0x20) {
+                throw new JSONException("Unescaped control character in string at position " + i);
             }
-            int p = q + 1; // first char after the opening quote
-            while (p < len) {
-                char c = this.sourceString.charAt(p);
-                if (c == '"') {
-                    break; // string ends
-                }
-                if (c == '\\') {
-                    p += 2; // skip the escape sequence's escaped character
-                    continue;
-                }
-                if (c < 0x20) {
-                    throw new JSONException("Unescaped control character in string at position " + p);
-                }
-                p++;
-            }
-            i = p + 1;
         }
     }
 
     int getPosition() {
         return pos;
+    }
+
+    /** Input length (the backing buffer carries one extra sentinel char). */
+    int getLength() {
+        return length;
+    }
+
+    /** Backing buffer, for callers that scan it directly (streaming array paths). */
+    char[] getBuffer() {
+        return source;
+    }
+
+    /** Sets the read position after a caller-driven scan of {@link #getBuffer()}. */
+    void setPosition(int p) {
+        this.pos = p;
     }
 
     /**
@@ -170,6 +165,9 @@ public final class JSONTokener {
             if (c == '\\') {
                 return decodeEscapes(src, len, this.pos, p);
             }
+            if (c < 0x20) {
+                throw new JSONException("Unescaped control character in string at position " + p);
+            }
             p++;
         }
         if (p >= len) {
@@ -183,6 +181,7 @@ public final class JSONTokener {
             if (q < 0) {
                 throw new JSONException("Unterminated string");
             }
+            checkControlChars(p, q);
             String result = this.sourceString.substring(this.pos, q);
             checkStringLength(q - this.pos);
             this.pos = q + 1;
@@ -191,8 +190,56 @@ public final class JSONTokener {
         return decodeEscapes(src, len, this.pos, b);
     }
 
+    /**
+     * Skips a string without materializing it — the validation counterpart of
+     * {@link #readString()}, used by {@link JSONParser#skipValue()} and
+     * {@code DingJson.isValid}. Same scan, same escape validation, same length
+     * limit; the (discarded) String is only built when the string actually
+     * contains a backslash, so escape-free documents allocate nothing.
+     */
+    void skipString() {
+        final char[] src = this.source;
+        final int len = this.length;
+        int p = this.pos;
+
+        int limit = Math.min(len, p + 16);
+        while (p < limit) {
+            char c = src[p];
+            if (c == '"') {
+                checkStringLength(p - this.pos);
+                this.pos = p + 1;
+                return;
+            }
+            if (c == '\\') {
+                decodeEscapes(src, len, this.pos, p); // validates; result discarded
+                return;
+            }
+            if (c < 0x20) {
+                throw new JSONException("Unescaped control character in string at position " + p);
+            }
+            p++;
+        }
+        if (p >= len) {
+            throw new JSONException("Unterminated string");
+        }
+
+        int q = this.sourceString.indexOf('"', p);
+        int b = this.sourceString.indexOf('\\', p);
+        if (b < 0 || (q >= 0 && q < b)) {
+            if (q < 0) {
+                throw new JSONException("Unterminated string");
+            }
+            checkControlChars(p, q);
+            checkStringLength(q - this.pos);
+            this.pos = q + 1;
+            return;
+        }
+        decodeEscapes(src, len, this.pos, b);
+    }
+
     /** Escape-decoding slow path, starting at the first backslash {@code b}. */
     private String decodeEscapes(char[] src, int len, int start, int b) {
+        checkControlChars(start, b);
         StringBuilder sb = new StringBuilder(b - start + 16);
         sb.append(src, start, b - start);
         int p = b;
@@ -232,7 +279,9 @@ public final class JSONTokener {
                         throw new JSONException("Invalid escape character: \\" + escaped);
                 }
             } else {
-                // control characters were already validated in the constructor
+                if (c < 0x20) {
+                    throw new JSONException("Unescaped control character in string at position " + (p - 1));
+                }
                 sb.append(c);
             }
         }
@@ -246,7 +295,138 @@ public final class JSONTokener {
         throw new JSONException("Invalid hex digit in unicode escape: " + c);
     }
 
+    /**
+     * Range-checked integer scan for values with 19+ digits (the only ones that
+     * can leave the {@code long} range). Negatives accumulate downward so that
+     * {@link Long#MIN_VALUE} — whose magnitude does not fit — stays representable.
+     */
+    private long checkedInteger(int from, int to) {
+        final char[] src = this.source;
+        int p = from;
+        boolean negative = false;
+        if (p < to && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+        long val = 0;
+        while (p < to) {
+            int digit = src[p] - '0';
+            if (negative) {
+                if (val < (Long.MIN_VALUE + digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 - digit;
+            } else {
+                if (val > (Long.MAX_VALUE - digit) / 10) {
+                    throw new JSONException("Invalid number: value out of range");
+                }
+                val = val * 10 + digit;
+            }
+            p++;
+        }
+        return val;
+    }
+
     // ── Number scanning ───────────────────────────────────────────
+
+    /** Powers of ten that are exactly representable as a double. */
+    private static final double[] POW10 = new double[23];
+
+    static {
+        double v = 1;
+        for (int i = 0; i < POW10.length; i++) {
+            POW10[i] = v;
+            v *= 10;
+        }
+    }
+
+    /**
+     * Converts an already grammar-validated number literal to a double without
+     * allocating the intermediate String that {@code Double.parseDouble} needs.
+     * <p>
+     * Correctly rounded, not merely "close": when the mantissa has at most 15
+     * significant digits (exactly representable as a long) and the decimal
+     * exponent is within ±22 (where 10^n is exact), a single multiply or divide
+     * rounds the exact decimal value once — which is exactly what the JDK's
+     * correctly-rounded parser produces. Anything else (longer mantissas,
+     * larger exponents) returns {@link Double#NaN} so the caller falls back to
+     * {@code Double.parseDouble}. NaN is a safe sentinel because JSON has no
+     * NaN literal, and the grammar is validated before this runs.
+     */
+    static double fastDouble(char[] src, int from, int to) {
+        int p = from;
+        boolean negative = false;
+        if (p < to && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+        long mantissa = 0;
+        int digits = 0;
+        int fracDigits = 0;
+        boolean seenDot = false;
+        while (p < to) {
+            char c = src[p];
+            if (c == '.') {
+                seenDot = true;
+                p++;
+                continue;
+            }
+            if (c == 'e' || c == 'E') {
+                break;
+            }
+            if (digits >= 15) {
+                return Double.NaN; // mantissa no longer exactly representable
+            }
+            mantissa = mantissa * 10 + (c - '0');
+            digits++;
+            if (seenDot) {
+                fracDigits++;
+            }
+            p++;
+        }
+
+        int exp = 0;
+        if (p < to) { // e / E
+            p++;
+            boolean expNegative = false;
+            if (p < to && src[p] == '+') {
+                p++;
+            } else if (p < to && src[p] == '-') {
+                expNegative = true;
+                p++;
+            }
+            for (; p < to; p++) {
+                exp = exp * 10 + (src[p] - '0');
+                if (exp > 30) {
+                    return Double.NaN; // far outside the exact power-of-ten range
+                }
+            }
+            if (expNegative) {
+                exp = -exp;
+            }
+        }
+
+        int scale = exp - fracDigits;
+        if (mantissa == 0) {
+            return negative ? -0.0 : 0.0;
+        }
+        double result;
+        if (scale == 0) {
+            result = (double) mantissa;
+        } else if (scale > 0) {
+            if (scale > 22) {
+                return Double.NaN;
+            }
+            result = (double) mantissa * POW10[scale];
+        } else {
+            if (scale < -22) {
+                return Double.NaN;
+            }
+            result = (double) mantissa / POW10[-scale];
+        }
+        return negative ? -result : result;
+    }
+
 
     /**
      * Reads a JSON number (integer or decimal, possibly negative, possibly
@@ -282,22 +462,23 @@ public final class JSONTokener {
             if (p >= len || src[p] < '0' || src[p] > '9') {
                 throw new JSONException("Invalid number at position " + this.pos);
             }
+            // Unchecked accumulation; 18 digits always fit in a long. Only the
+            // rare 19+ digit integer parts rescan with a per-digit range test.
+            int digits = 0;
             while (p < len && src[p] >= '0' && src[p] <= '9') {
-                int digit = src[p] - '0';
-                if (negative) {
-                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
-                        overflow = true; // keep scanning; reported below
-                    } else {
-                        intVal = intVal * 10 - digit;
-                    }
-                } else {
-                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
-                        overflow = true; // keep scanning; reported below
-                    } else {
-                        intVal = intVal * 10 + digit;
-                    }
-                }
+                intVal = intVal * 10 + (src[p] - '0');
                 p++;
+                digits++;
+            }
+            if (digits > 18) {
+                int end = p;
+                try {
+                    intVal = checkedInteger(start, end);
+                } catch (JSONException e) {
+                    overflow = true; // reported below with the usual message
+                }
+            } else if (negative) {
+                intVal = -intVal;
             }
         }
 
@@ -343,23 +524,38 @@ public final class JSONTokener {
             return intVal;
         }
 
-        // Decimal / scientific — single allocation, JDK-optimized parser.
+        // Decimal / scientific — fast path first (no String allocation),
+        // falling back to the JDK parser for long mantissas / big exponents.
+        double d = fastDouble(src, start, p);
+        if (!Double.isNaN(d)) {
+            return d;
+        }
+        String text = new String(src, start, p - start);
+        d = Double.parseDouble(text);
         // Values that overflow double come back as ±Infinity and would then
         // serialize as null (data loss) — keep full precision in a BigDecimal
         // instead (Gson-style). The strict scalar double path (readDouble)
         // rejects these explicitly.
-        String text = new String(src, start, p - start);
-        double d = Double.parseDouble(text);
         if (Double.isInfinite(d)) {
+            java.math.BigDecimal bd;
             try {
-                return new java.math.BigDecimal(text);
+                bd = new java.math.BigDecimal(text);
             } catch (NumberFormatException e) {
                 // absurd exponents (i_number_huge_exp.json) exceed even BigDecimal
                 throw new JSONException("Invalid number: exponent out of range at position " + start);
             }
+            // A huge exponent parses instantly but is a bomb downstream:
+            // toPlainString() on scale -2147483648 allocates 100M+ characters.
+            if (bd.scale() < -MAX_BIG_SCALE || bd.scale() > MAX_BIG_SCALE) {
+                throw new JSONException("Number exponent out of range at position " + start);
+            }
+            return bd;
         }
         return d;
     }
+
+    /** Largest {@code |scale|} accepted for a {@code BigDecimal}. */
+    private static final int MAX_BIG_SCALE = 10_000;
 
     /**
      * Reads a JSON number that must be an integer, returning a raw {@code long}
@@ -387,22 +583,21 @@ public final class JSONTokener {
             if (p >= len || src[p] < '0' || src[p] > '9') {
                 throw new JSONException("Invalid number at position " + this.pos);
             }
+            int digits = 0;
             while (p < len && src[p] >= '0' && src[p] <= '9') {
-                int digit = src[p] - '0';
-                if (negative) {
-                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
-                        overflow = true;
-                    } else {
-                        intVal = intVal * 10 - digit;
-                    }
-                } else {
-                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
-                        overflow = true;
-                    } else {
-                        intVal = intVal * 10 + digit;
-                    }
-                }
+                intVal = intVal * 10 + (src[p] - '0');
                 p++;
+                digits++;
+            }
+            if (digits > 18) {
+                int end = p;
+                try {
+                    intVal = checkedInteger(this.pos, end);
+                } catch (JSONException e) {
+                    overflow = true;
+                }
+            } else if (negative) {
+                intVal = -intVal;
             }
         }
 
@@ -468,6 +663,80 @@ public final class JSONTokener {
         String raw = new String(src, start, p - start);
         this.pos = p;
         return raw;
+    }
+
+    /**
+     * Validates and skips a JSON number without boxing it — the validation
+     * counterpart of {@link #readNumber()}. Grammar and range rules are
+     * identical (integer digits that overflow {@code long} are still rejected,
+     * decimal/scientific values that overflow {@code double} stay valid).
+     */
+    void skipNumber() {
+        final char[] src = this.source;
+        final int len = this.length;
+        final int start = this.pos;
+        int p = start;
+
+        boolean negative = false;
+        if (p < len && src[p] == '-') {
+            negative = true;
+            p++;
+        }
+
+        long intVal = 0;
+        boolean overflow = false;
+        if (p < len && src[p] == '0') {
+            p++;
+        } else {
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number at position " + start);
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                int digit = src[p] - '0';
+                if (negative) {
+                    if (intVal < (Long.MIN_VALUE + digit) / 10) {
+                        overflow = true;
+                    } else {
+                        intVal = intVal * 10 - digit;
+                    }
+                } else {
+                    if (intVal > (Long.MAX_VALUE - digit) / 10) {
+                        overflow = true;
+                    } else {
+                        intVal = intVal * 10 + digit;
+                    }
+                }
+                p++;
+            }
+        }
+
+        if (p < len && src[p] == '.') {
+            p++;
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number: expected digit after decimal point");
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                p++;
+            }
+        }
+
+        if (p < len && (src[p] == 'e' || src[p] == 'E')) {
+            p++;
+            if (p < len && (src[p] == '+' || src[p] == '-')) {
+                p++;
+            }
+            if (p >= len || src[p] < '0' || src[p] > '9') {
+                throw new JSONException("Invalid number: expected digit in exponent");
+            }
+            while (p < len && src[p] >= '0' && src[p] <= '9') {
+                p++;
+            }
+        }
+
+        if (overflow) {
+            throw new JSONException("Invalid number: value out of range");
+        }
+        this.pos = p;
     }
 
     /**

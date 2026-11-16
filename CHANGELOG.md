@@ -2,7 +2,95 @@
 
 All notable changes to DingJson are documented here.
 
+## [1.1.0] — 未发布（编译器 / 运行期优化）
+
+### Performance
+相对 1.0.0 的同 JVM A/B 实测（`BENCHMARK.md` 第 1 节，ns/op 越低越好）：
+
+| 操作 | 1.0.0 | 1.1.0 | 变化 |
+|---|---|---|---|
+| `parse` 复杂文档 | 6,608 | 4,807 | **1.37x**（四次运行 1.29–1.70x） |
+| `serialize` 复杂文档 | 4,892 | 4,209 | 1.16x |
+| `parse` 100k 整数数组 | 1,175,471 | 1,024,195 | 1.15x |
+| `bean-list` 100 beans | 68,681 | 45,548 | **1.51x** |
+| `bean-parse` | 937 | 1,055 | 噪声内（单 bean 仅 ~1 μs，判读用 `bean-list`） |
+| `bean-serialize` | 266 | 298 | 持平（噪声内） |
+
+横向：`parse` 从第 4 升到**第 2**，100k 数组解析**第 1**，`bean-list` 第 5 → 第 2，
+`serialize` 仍第 4，`readIntArray` 绝对领先（1,438 ops/sec）。
+
+### Added
+- **编译期 codec 生成**：给类加 `@DingJsonSerializable`，注解处理器生成
+  `<类名>$$DingJsonCodec`（直线代码，无反射分派），运行期自动发现、找不到即回退反射。
+  生成失败（私有/`final` 字段、泛型、抽象类）只发 NOTE 不阻断构建；
+  `-Ddingjson.codec.disabled=true` 可关闭
+- **`DingJson.registerCodec(Class, DingJsonCodec)`**：显式注册生成的 codec，
+  把"按类名查找 codec"这最后一处 `Class.forName` 也去掉，bean 路径变成零反射
+  （GraalVM native-image / 受限 ClassLoader 场景）；必须在首次使用前注册，晚了抛 `JSONException`
+- **bean 序列化热路径**：字段 key 预引用（`"name":` 一次构建）、无参构造器缓存、
+  `serialize()` 改为 `ClassValue` 分发表
+
+### Fixed
+- **树路径不认 `@JSONField(format)`**：`parseObject(text, TypeReference)` 遇到
+  `Date` + `@JSONField(format = "yyyy-MM-dd")` 时抛 `NumberFormatException`
+  （`Long.parseLong("2025-01-01")`），写得出却读不回；现在与流式路径一致
+
+## [1.0.1] — 2026-11-16 (安全审计修复)
+
+### Performance
+无变化：本轮只改错误路径与类型校验，快路径唯一改动是 `readScalar` 的
+int/short/byte 分支多一次 `readLong`（差异在噪声内，见 `BENCHMARK.md`）。
+
+### Security / 类型安全
+修复 `docs/security-audit.md` 中的 V1–V13。V1 是 **JVM 崩溃级**（未捕获的
+`SIGSEGV`/`SIGBUS`），其余是数据静默损坏与报错质量问题。
+- **V1（P0）类型混淆致 JVM 崩溃**：`Unsafe` 写字段绕过了 JVM 的字段类型不变量，
+  转换失败的原始 JSON 值被写进不相干字段，读取时 `Method::print_external_name`
+  / `String.valueOf` 直接 SIGSEGV，`String[]` 字段塞 `JSONArray` 则把对象头当数组
+  长度读出 50960989 → SIGBUS。现在三层拦截：
+  - `putField` 对非 primitive 字段做 `isInstance` 校验（Unsafe 与反射两条路径都过）
+  - `convert` 兜底从 `return value` 改为抛 `JSONException`
+  - 数组字段（其 `Modifier` 含 `ABSTRACT`）在抽象检查之前单独路由到数组转换；
+    接口/抽象类字段不再是"保留原值"而是显式报错
+- **V2 窄整型静默截断**：`2147483648 → -2147483648`、`70000 → 4464`、`300 → 44`；
+  现在 `readScalar`/`convert` 走 `readLong` + 范围检查（`toIntExact`/`toShortExact`/
+  `toByteExact`，零装箱），与 `1e10` 已有的报错行为一致
+- **V3 数值 getter 饱和**：`getLong("1e40")` 返回 `Long.MAX_VALUE`；现委托给
+  统一转换器并抛 `JSONException`（`getInteger/getLong/getDouble/getBoolean`）
+- **V4 泛型字段丢类型**：`Box<T>.value` 拿到原始 JSON 值；现在解析
+  `ParameterizedType` 时建立类型变量绑定（含 `List<T>`），字段按实参转换
+- **V5 数组元素转换失败**：随 V1 一并修复，`String[]` ← `[1,2]` 得到 `["1","2"]`，
+  `int[]` ← `["a"]` 抛 `JSONException`
+- **V6 指数炸弹**：`1e2147483648` 曾构造出 `scale=-2147483648` 的 `BigDecimal`
+  （`toPlainString()` 即 OOM、`setScale` 抛 `ArithmeticException`）；
+  现在 `|scale| > 10000` 直接拒绝
+- **V7/V8 深度**：`parse`/`skipValue` 捕获 `StackOverflowError` 转 `JSONException`；
+  新增 `DingJsonConfig.maxDepth(int)`（默认 512）供小栈环境调低
+- **V9 字段名遮蔽**：同时声明 `name` 与 `NAME` 的类，`{"name":"x"}` 会写进 `NAME`
+  （小写键覆盖精确键）；精确/小写两张表分离，精确匹配优先
+- **V10 `JSONPath.eval(..., Class)` 裸 `ClassCastException`**：改为走统一转换器，
+  抛 `JSONException`
+- **V11 报错无字段名**：转换失败消息现在带 `Field 'age': ...` 前缀（嵌套 bean 形成路径）
+- **V12 `U+2028/U+2029` 不转义**：JavaScript 里是行终止符，可截断 `<script>`；
+  现在转义为 `\u2028`/`\u2029`，round-trip 不变
+- **V13 null Map 键**：输出 `"null"` 与字符串 `"null"` 无法区分，改为抛 `JSONException`
+
+### Fixed
+- **`clean` 后首个构建失败**：`-proc:full` 原本作用于全部 compile，导致
+  `META-INF/services` 在处理器类存在之前被读取；现在只加在 `test-compile`
+- **测试脆弱性**：`ExplicitCodecRegistrationTest.UpperCaseCodec` 由 `private` 改为
+  包私有，去掉随编译单元状态变化的 synthetic 访问构造器
+
+### Tests
+- 新增 `DingJsonTypeSafetyTest`（25 例，V1–V13 的 POC 全部转为回归测试），
+  测试总数 509 → **534**，Unsafe 与 `-Ddingjson.unsafe=false` 两条路径各跑一遍
+
 ## [1.0.0] — 2026-10-22 (企业级基线)
+
+### Performance
+相对 0.1.0：解析 **1.65x**（0.0127 → 0.0077 ms/op）、序列化 **1.98x**
+（0.0101 → 0.0051）、100k 整数数组 **2.2x**（2.95 → 1.34，另加流式
+`readIntArray` 0.78 ms，零装箱）。数据见 `BENCHMARK.md`。
 
 ### Security (安全加固 — 审计修复 P0–P3)
 - **输入大小上限（OOM DoS 防护）**：新增 `DingJsonConfig.maxInputBytes()`（默认 10 MB，

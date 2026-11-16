@@ -137,6 +137,37 @@ public class User {
 }
 ```
 
+### 编译期 codec（可选，免反射）
+
+给类加 `@DingJsonSerializable`，注解处理器会生成 `<类名>$$DingJsonCodec`，
+序列化/反序列化改走生成的直线代码（无反射查表、无 `instanceof` 分派）：
+
+```java
+@DingJsonSerializable
+public class User {
+    public int id;
+    public String name;
+}
+
+DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用它
+```
+
+- 字段需对生成的类可见（`public`，或声明在与类同包）；`private`/`final` 字段、
+  泛型类、抽象类会**编译期给一条 NOTE 并退回反射**，绝不阻断构建
+- 输出与原反射路径**逐字节相同**（HTML 转义、`@JSONField(name/serialize/format)`、
+  `writeNullFields`、日期格式全部一致，测试逐字节比对）
+- 想连最后那次「按名字查类」也去掉，显式注册即可（此时 bean 路径**零反射**）：
+
+  ```java
+  DingJson.registerCodec(User.class, new User$$DingJsonCodec());   // 放在 static 初始化块
+  ```
+
+  必须在首次使用该类型之前注册，晚了会抛 `JSONException` 而不是静默失效。
+  适用于 GraalVM native-image、受限 ClassLoader 等 `Class.forName` 不可用/不被允许的场景
+- 关闭：`-Ddingjson.codec.disabled=true`；JDK 23+ 需要 `-proc:full`（本项目 `pom.xml` 已加）
+- 收益有限但真实：bean 序列化 1.05–1.2x、树路径反序列化约 1.05x
+  —— 反射路径此前已做过 key 预引用、构造器缓存与 Unsafe 直访
+
 ## 内置 JDK 类型支持
 
 | 类型 | 序列化 | 反序列化 |
@@ -156,6 +187,14 @@ public class User {
 - **控制字符**：字符串内裸控制字符按 RFC 8259 拒绝
 - **合规背书**：JSONTestSuite 318 用例 100% 通过
 
+## 文档
+
+- [使用文档](docs/usage.md) —— 全部公开 API 与用法
+- [技术架构](docs/architecture.md) —— 设计取舍、核心处理逻辑、代码地图
+- [优化报告](docs/optimization-report.md) —— 每项优化的实测前后对比
+- [基准测试](BENCHMARK.md) / [变更记录](CHANGELOG.md)
+- 自己跑基准：`./bench.sh`（横向对比）/ `./bench.sh ab <旧版本 classes>`（同 JVM A/B）
+
 ## 性能（JDK 25，详见 [BENCHMARK.md](BENCHMARK.md)）
 
 | 场景 | DingJson | fastjson2 | Jackson | Gson | org.json |
@@ -166,13 +205,16 @@ public class User {
 
 流式 `readIntArray` 全面领先（零装箱 + 零中间树）。
 
+> 上表是 1.0.0 基线。当前分支（1.1.0-dev）相对 1.0.0：解析 **1.37x**、序列化 1.16x、
+> 100k 数组 1.15x、100 个 bean 1.51x（同 JVM A/B 实测，见 `BENCHMARK.md` 第 1 节）。
+
 ## Maven
 
 ```xml
 <dependency>
     <groupId>com.dingjson</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -182,7 +224,7 @@ Java 8+，无传递依赖。
 
 ```bash
 mvn clean package      # 单元测试 + 合规测试 + Checkstyle
-mvn test              # 488 个测试 + JSONTestSuite 318 用例
+mvn test              # 508 个测试 + JSONTestSuite 318 用例
 ```
 
 ## JPMS 说明

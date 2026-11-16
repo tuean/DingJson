@@ -6,7 +6,7 @@
 
     <groupId>com.dingjson</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>DingJson</name>
@@ -137,6 +137,22 @@
                     <target>8</target>
                     <encoding>UTF-8</encoding>
                 </configuration>
+                <!-- JDK 23+ no longer runs processors found on the classpath by
+                     default; the DingJson codec processor must run for beans
+                     annotated with @DingJsonSerializable. Only test-compile needs
+                     it: the main sources ship the processor itself, and enabling it
+                     there makes the first build after `clean` fail (the service file
+                     is copied before the class exists). -->
+                <executions>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <arg>-proc:full</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <plugin>
@@ -168,6 +184,29 @@
             </plugin>
 
 
+
+            <!-- Run the suite twice: once at full speed (Unsafe field access),
+                 once forcing the reflection fallback, so the paths stay equal. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <goals><goal>test</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>reflection-fallback</id>
+                        <goals><goal>test</goal></goals>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <dingjson.unsafe>false</dingjson.unsafe>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
 
             <!-- Checkstyle for code quality -->
             <plugin>
