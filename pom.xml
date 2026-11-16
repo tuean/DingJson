@@ -100,8 +100,9 @@
                         </executions>
                     </plugin>
                     <!-- Central Publisher Portal (OSSRH was shut down 2025-06-30).
-                         `mvn -P release deploy` uploads a deployment, then you click
-                         Publish in https://central.sonatype.com/ (autoPublish false). -->
+                         `mvn -P release deploy` uploads AND publishes (autoPublish true).
+                         手动点 Publish 实测不可靠（UI 点击静默失败、publisher API 返回 500），
+                         所以用插件自带 autoPublish；代价是上传即公开，发错只能申请 tombstone。 -->
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
@@ -109,7 +110,7 @@
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
-                            <autoPublish>false</autoPublish>
+                            <autoPublish>true</autoPublish>
                             <waitUntil>uploaded</waitUntil>
                         </configuration>
                     </plugin>

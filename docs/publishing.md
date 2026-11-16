@@ -74,9 +74,10 @@ mvn -o clean test
 # 3. 上传到 Portal（会跑 gpg:sign、source jar、javadoc jar、全部测试）
 mvn -P release clean deploy
 
-# 4. 到 https://central.sonatype.com/ → Deployments 找到这次 deployment
-#    检查文件清单后点 Publish
-#    （pom 里 autoPublish=false，故意留这一步人工确认）
+# 4. 插件上传后自动 publish（pom 里 autoPublish=true）
+#    到 https://central.sonatype.com/ → Deployments 确认状态：
+#    VALIDATED → PUBLISHING → PUBLISHED
+#    想改回人工确认：pom 的 autoPublish 改 false，再到页面点 Publish
 
 # 5. 打 tag 并推送
 git tag -a v1.1.0 -m "DingJson 1.1.0"
@@ -102,7 +103,7 @@ curl -sI https://repo1.maven.org/maven2/io/github/tuean/dingjson/1.1.0/dingjson-
 | `Namespace not found` / `403` | namespace 还没验证通过，或 groupId 和 namespace 不一致 |
 | `Invalid POM: missing ...` | Central 强制要求 `name`/`description`/`url`/`licenses`/`developers`/`scm`，缺一个就拒收 |
 | `Javadoc jar is empty` / javadoc 报错 | `maven-javadoc-plugin` 版本太老（JDK 25 需要 3.11+），pom 已固定 3.11.2 |
-| 发布错了想撤回 | Central 上的 artifact **不可删除**（只能申请 tombstone），所以 `autoPublish=false` 让人工确认 |
+| 发布错了想撤回 | Central 上的 artifact **不可删除**（只能申请 tombstone）。当前 `autoPublish=true`（上传即公开）；要人工确认就把 pom 的 `autoPublish` 改回 `false` |
 
 ## 为什么不用 JitPack
 
