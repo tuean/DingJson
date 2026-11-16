@@ -67,18 +67,32 @@ public final class JSONSerializer {
     /** Marker for "this class has no generated codec" (ClassValue cannot cache null). */
     private static final Object NO_CODEC = new Object();
 
+    /** Codecs handed in by the application, so no class lookup is needed at all. */
+    private static final ConcurrentHashMap<Class<?>, com.dingjson.codec.DingJsonCodec<?>> REGISTERED
+            = new ConcurrentHashMap<>();
+
+    /** Types whose codec lookup already happened, i.e. too late for a registration. */
+    private static final Set<Class<?>> RESOLVED = ConcurrentHashMap.newKeySet();
+
     /**
      * Compile-time generated codecs, resolved once per class.
      * <p>
      * The annotation processor emits {@code <BinaryName>$$DingJsonCodec} for
      * {@link com.dingjson.annotation.DingJsonSerializable} beans. Discovery is a
      * single {@code Class.forName} on first use of the class, then a cache hit,
-     * and a missing codec costs nothing afterwards. {@code -Ddingjson.codec=false}
-     * disables the lookup entirely (the reflective path is always available).
+     * and a missing codec costs nothing afterwards. A codec registered through
+     * {@link #registerCodec} is found without any class lookup.
+     * {@code -Ddingjson.codec.disabled=true} disables discovery entirely (the
+     * reflective path is always available).
      */
     private static final ClassValue<Object> CODEC_CACHE = new ClassValue<Object>() {
         @Override
         protected Object computeValue(Class<?> type) {
+            RESOLVED.add(type);
+            com.dingjson.codec.DingJsonCodec<?> registered = REGISTERED.get(type);
+            if (registered != null) {
+                return registered;
+            }
             if (Boolean.getBoolean("dingjson.codec.disabled")) {
                 return NO_CODEC;
             }
@@ -91,6 +105,28 @@ public final class JSONSerializer {
             }
         }
     };
+
+    /**
+     * Registers the codec for {@code type}, removing the only reflection left in
+     * the codec path: the {@code Class.forName} that discovers
+     * {@code <BinaryName>$$DingJsonCodec} by name. Everything else was already
+     * generated code, so with a registration the bean path is reflection-free —
+     * useful where class lookup by name is unavailable or unwanted (GraalVM
+     * native-image, restricted class loaders, audited environments).
+     * <p>
+     * Call it before the type is first (de)serialized, typically from a static
+     * initialiser; later registrations are rejected instead of silently ignored.
+     */
+    public static <T> void registerCodec(Class<T> type, com.dingjson.codec.DingJsonCodec<T> codec) {
+        if (codec == null) {
+            throw new JSONException("codec must not be null");
+        }
+        if (RESOLVED.contains(type)) {
+            throw new JSONException("Codec for " + type.getName()
+                    + " was already resolved; register it before first use");
+        }
+        REGISTERED.put(type, codec);
+    }
 
     @SuppressWarnings("unchecked")
     private static com.dingjson.codec.DingJsonCodec<Object> codecOf(Class<?> type) {

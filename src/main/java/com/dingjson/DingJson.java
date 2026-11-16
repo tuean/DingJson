@@ -292,6 +292,27 @@ public final class DingJson {
         return new DingJsonMapper(DingJsonConfig.defaults());
     }
 
+    // ── Codecs ───────────────────────────────────────────────────
+
+    /**
+     * Registers the (usually generated) codec for {@code type} explicitly.
+     * <p>
+     * Annotated beans are found automatically on first use, which costs one
+     * {@code Class.forName} per class. Registering up front removes even that:
+     * the bean path then contains no reflection at all, which matters where
+     * lookup by name is unavailable or unwanted (GraalVM native-image,
+     * restricted class loaders). Must be called before the type is first
+     * (de)serialized, normally from a static initialiser.
+     *
+     * <pre>{@code
+     * DingJson.registerCodec(User.class, new User$$DingJsonCodec());
+     * }</pre>
+     */
+    public static <T> void registerCodec(Class<T> type,
+            com.dingjson.codec.DingJsonCodec<T> codec) {
+        JSONSerializer.registerCodec(type, codec);
+    }
+
     // ── Streaming ────────────────────────────────────────────────
 
     /**

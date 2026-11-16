@@ -9,6 +9,9 @@ All notable changes to DingJson are documented here.
   `<类名>$$DingJsonCodec`（直线代码，无反射分派），运行期自动发现、找不到即回退反射。
   生成失败（私有/`final` 字段、泛型、抽象类）只发 NOTE 不阻断构建；
   `-Ddingjson.codec.disabled=true` 可关闭
+- **`DingJson.registerCodec(Class, DingJsonCodec)`**：显式注册生成的 codec，
+  把"按类名查找 codec"这最后一处 `Class.forName` 也去掉，bean 路径变成零反射
+  （GraalVM native-image / 受限 ClassLoader 场景）；必须在首次使用前注册，晚了抛 `JSONException`
 - **bean 序列化热路径**：字段 key 预引用（`"name":` 一次构建）、无参构造器缓存、
   `serialize()` 改为 `ClassValue` 分发表
 

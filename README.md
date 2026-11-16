@@ -156,6 +156,14 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
   泛型类、抽象类会**编译期给一条 NOTE 并退回反射**，绝不阻断构建
 - 输出与原反射路径**逐字节相同**（HTML 转义、`@JSONField(name/serialize/format)`、
   `writeNullFields`、日期格式全部一致，测试逐字节比对）
+- 想连最后那次「按名字查类」也去掉，显式注册即可（此时 bean 路径**零反射**）：
+
+  ```java
+  DingJson.registerCodec(User.class, new User$$DingJsonCodec());   // 放在 static 初始化块
+  ```
+
+  必须在首次使用该类型之前注册，晚了会抛 `JSONException` 而不是静默失效。
+  适用于 GraalVM native-image、受限 ClassLoader 等 `Class.forName` 不可用/不被允许的场景
 - 关闭：`-Ddingjson.codec.disabled=true`；JDK 23+ 需要 `-proc:full`（本项目 `pom.xml` 已加）
 - 收益有限但真实：bean 序列化 1.05–1.2x、树路径反序列化约 1.05x
   —— 反射路径此前已做过 key 预引用、构造器缓存与 Unsafe 直访

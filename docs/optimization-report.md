@@ -95,6 +95,13 @@
 codec 省的是**分派**不是**分配**，所以收益集中在 CPU，不在 GC。这也解释了为什么
 100 个 bean 的批量场景比单 bean 明显 —— 分派开销是每次调用都要付的。
 
+最后那一处反射：生成代码里 `b.x = ...` 是直接字段访问（无 `Field.get`、无 Unsafe offset、
+无 `instanceof` 分派），所以**每字段**早已零反射。残留的反射只有一处——运行期怎么知道
+"这个类有没有 codec"，只能靠 `Class.forName(binary + "$$DingJsonCodec")`，每类一次，之后
+走 `ClassValue` 缓存。要连它也去掉，用 `DingJson.registerCodec(User.class, new User$$DingJsonCodec())`
+显式注册：注册表在 `computeValue` 里先被查询，命中就完全不做类查找。这也是 native-image
+场景的实际需求（拼字符串的 `Class.forName` 需要反射配置，否则找不到类）。
+
 安全阀：
 
 - 生成失败（`private`/`final` 字段、泛型类、抽象类、跨包不可见）只发一条 NOTE 并回退反射，
