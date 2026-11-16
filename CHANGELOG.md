@@ -22,6 +22,11 @@ All notable changes to DingJson are documented here.
 横向：`parse` 从第 4 升到**第 2**，100k 数组解析**第 1**，`bean-list` 第 5 → 第 2，
 `serialize` 仍第 4，`readIntArray` 绝对领先（1,438 ops/sec）。
 
+### Removed
+- **单文件分发版**（`release/DingJson.java` + `tools/generate_single_file.py`）：
+  现在有 Maven 坐标可用，单文件版长期跟不上新特性（codec、`maxDepth`、V1 类型校验
+  都不在里面），维护成本大于收益。需要"无构建工具"场景请直接下载 jar
+
 ### Build / 发布
 - 首次发布到 Maven Central：坐标 `io.github.tuean:dingjson`（groupId 由 `com.dingjson`
   改为 `io.github.tuean`，走 GitHub namespace 自动验证，不需要域名）

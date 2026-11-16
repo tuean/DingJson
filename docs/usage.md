@@ -34,11 +34,6 @@
 </dependency>
 ```
 
-### 单文件版
-
-`release/DingJson.java` 是一个可直接拷进项目的单文件版本（无需 Maven、无注解处理器）。
-适合脚本、教学、或不允许引入新依赖的环境。功能与 jar 版一致，**不含**编译期 codec。
-
 ### 环境要求
 
 - Java 8+（字节码 target 8）
