@@ -2,7 +2,22 @@
 
 All notable changes to DingJson are documented here.
 
-## [未发布]
+## [1.1.0] — 未发布（编译器 / 运行期优化）
+
+### Performance
+相对 1.0.0 的同 JVM A/B 实测（`BENCHMARK.md` 第 1 节，ns/op 越低越好）：
+
+| 操作 | 1.0.0 | 1.1.0 | 变化 |
+|---|---|---|---|
+| `parse` 复杂文档 | 18,775 | 11,576 | **1.62x** |
+| `serialize` 复杂文档 | 13,477 | 11,970 | 1.13x |
+| `parse` 100k 整数数组 | 3,398,416 | 2,705,263 | 1.26x |
+| `bean-parse` | 2,631 | 2,251 | 1.17x |
+| `bean-list` 100 beans | 115,602 | 80,306 | 1.44x |
+| `bean-serialize` | 691 | 737 | 持平（噪声内） |
+
+横向：`parse` 从第 4 升到**第 2**，100k 数组解析**第 1**，`bean-list` 第 5 → 第 2，
+`serialize` 仍第 4，`readIntArray` 绝对领先（1,438 ops/sec）。
 
 ### Added
 - **编译期 codec 生成**：给类加 `@DingJsonSerializable`，注解处理器生成
@@ -22,10 +37,13 @@ All notable changes to DingJson are documented here.
 
 ## [1.0.1] — 2026-11-16 (安全审计修复)
 
-修复 `docs/security-audit.md` 中的 V1–V13。V1 是 **JVM 崩溃级**（未捕获的
-`SIGSEGV`/`SIGBUS`），其余是数据静默损坏与报错质量问题。
+### Performance
+无变化：本轮只改错误路径与类型校验，快路径唯一改动是 `readScalar` 的
+int/short/byte 分支多一次 `readLong`（差异在噪声内，见 `BENCHMARK.md`）。
 
 ### Security / 类型安全
+修复 `docs/security-audit.md` 中的 V1–V13。V1 是 **JVM 崩溃级**（未捕获的
+`SIGSEGV`/`SIGBUS`），其余是数据静默损坏与报错质量问题。
 - **V1（P0）类型混淆致 JVM 崩溃**：`Unsafe` 写字段绕过了 JVM 的字段类型不变量，
   转换失败的原始 JSON 值被写进不相干字段，读取时 `Method::print_external_name`
   / `String.valueOf` 直接 SIGSEGV，`String[]` 字段塞 `JSONArray` 则把对象头当数组
@@ -68,6 +86,11 @@ All notable changes to DingJson are documented here.
   测试总数 509 → **534**，Unsafe 与 `-Ddingjson.unsafe=false` 两条路径各跑一遍
 
 ## [1.0.0] — 2026-10-22 (企业级基线)
+
+### Performance
+相对 0.1.0：解析 **1.65x**（0.0127 → 0.0077 ms/op）、序列化 **1.98x**
+（0.0101 → 0.0051）、100k 整数数组 **2.2x**（2.95 → 1.34，另加流式
+`readIntArray` 0.78 ms，零装箱）。数据见 `BENCHMARK.md`。
 
 ### Security (安全加固 — 审计修复 P0–P3)
 - **输入大小上限（OOM DoS 防护）**：新增 `DingJsonConfig.maxInputBytes()`（默认 10 MB，
