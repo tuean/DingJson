@@ -54,17 +54,22 @@
 
 ## 1. 版本回归：1.0.0 → 1.1.0-dev（同 JVM 交替，ns/op，越低越好）
 
-| 操作 | 1.0.0 | 1.1.0-dev | 变化 | 主要来源 |
-|---|---|---|---|---|
-| `parse` 复杂文档 | 18,775 | **11,576** | **1.62x** | 零分配浮点解析、跳过校验预扫描、`quote()` 直写缓冲 |
-| `serialize` 复杂文档 | 13,477 | **11,970** | **1.13x** | key 预引用、`StringBuilder` 分段拷贝 |
-| `parse` 100k 整数数组 | 3,398,416 | **2,705,263** | **1.26x** | 流式就地扫描、`checkedInteger`、零装箱 |
-| `bean-parse`（标量字段直读） | 2,631 | **2,251** | **1.17x** | 字段元数据预计算、构造器缓存、codec 分派 |
-| `bean-serialize` | 691 | 737 | 0.94x（持平） | 字段访问仅占序列化总成本 ~4%，差异在噪声内 |
-| `bean-list` 100 beans | 115,602 | **80,306** | **1.44x** | 上述累积（每 bean 都受益） |
+| 操作 | 1.0.0 | 1.1.0-dev | 变化 | 4 次运行区间 | 主要来源 |
+|---|---|---|---|---|---|
+| `parse` 复杂文档 | 6,608 | **4,807** | **1.37x** | 1.29–1.70x | 零分配浮点解析、跳过校验预扫描、`quote()` 直写缓冲 |
+| `serialize` 复杂文档 | 4,892 | **4,209** | **1.16x** | 1.13–1.22x | key 预引用、`StringBuilder` 分段拷贝 |
+| `parse` 100k 整数数组 | 1,175,471 | **1,024,195** | **1.15x** | 1.15–1.30x | 流式就地扫描、`checkedInteger`、零装箱 |
+| `bean-parse`（标量字段直读） | 937 | 1,055 | 噪声内 | 0.89–1.49x | 单 bean 仅 ~1 μs，分派抖动占比过大，判读用 `bean-list` |
+| `bean-serialize` | 266 | 298 | 噪声内 | 0.89–1.02x | 字段访问仅占序列化总成本 ~4% |
+| `bean-list` 100 beans | 68,681 | **45,548** | **1.51x** | 1.44–1.57x | 上述累积（每 bean 都受益） |
 
-> 覆盖运行（`rounds=5`）的比值：1.70x / 1.22x / 1.30x / 1.18x / 持平 / 1.57x —— 方向与量级
-> 与上表一致，故取较保守的一列。
+> 上表是机器空闲（`load ~6`）时 7 轮中位数的一份完整输出；`4 次运行区间` 是同一 harness
+> 在 `load 6~34` 下重复采集的比值范围。`serialize`（1.13–1.22x）和 `bean-list`（1.44–1.57x）
+> 在每次运行里都稳定，`parse` 波动较大，所以给区间而不是单点。
+>
+> `bean-parse` 一行不可靠：单个 bean 只需 ~1 μs，`MethodHandle` 分派与调度抖动（±200 ns）
+> 就能翻转结论——同一代码四次运行给出 0.89x、1.17x、1.18x、1.49x。可信的是 `bean-list`：
+> 100 个 bean 摊薄了固定开销，稳定 1.44–1.57x，说明 bean 解析确实变快了。
 
 **为什么 `bean-serialize` 没有提升**：序列化一个 bean 的成本 = 反射/Unsafe 字段读取（~4%）
 + 数字/字符串格式化 + `StringBuilder` 追加（~90%）。优化只动了那 4%，所以测不出来。
@@ -233,19 +238,17 @@
 ## 8. 复现
 
 ```bash
-# 横向对比（官方 harness）
-mvn test-compile
-mvn dependency:build-classpath -Dmdep.outputFile=cp.txt
-java -Xms1g -Xmx2g -cp "target/test-classes:target/classes:$(cat cp.txt)" \
-     com.dingjson.Benchmark
+# 横向对比（官方 harness，7 分钟左右）
+./bench.sh
 
-# 版本 A/B（同 JVM 交替）：把旧版本编译到别处，再挂两个 classes 目录
+# 版本 A/B（同 JVM 交替）：旧版本用 worktree 编一份
 git worktree add /tmp/dj100 <old-commit>
 (cd /tmp/dj100 && mvn -o -q compile)
-javac -cp "target/classes:$(cat cp.txt)" -d /tmp/ab ABBench.java
-java -Xms1g -Xmx2g -cp "/tmp/ab:target/classes:$(cat cp.txt)" \
-     ABBench /tmp/dj100/target/classes 7
+./bench.sh ab /tmp/dj100/target/classes 7
 ```
+
+`bench.sh` 会自动 `test-compile`、按需生成 `cp.txt`，并在检测到残留的
+`java -Xms1g` 进程时打印警告（它们会让数据整体偏移 2~3 倍）。
 
 > 依赖说明：fastjson1/2、jackson、gson、org.json 仅为 benchmark 测试依赖（test scope），
 > 不进入 DingJson 发布产物；fastjson 1.2.83 虽有已知 AutoType 漏洞，但仅存在于测试 classpath。

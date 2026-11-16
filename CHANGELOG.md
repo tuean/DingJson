@@ -9,12 +9,12 @@ All notable changes to DingJson are documented here.
 
 | 操作 | 1.0.0 | 1.1.0 | 变化 |
 |---|---|---|---|
-| `parse` 复杂文档 | 18,775 | 11,576 | **1.62x** |
-| `serialize` 复杂文档 | 13,477 | 11,970 | 1.13x |
-| `parse` 100k 整数数组 | 3,398,416 | 2,705,263 | 1.26x |
-| `bean-parse` | 2,631 | 2,251 | 1.17x |
-| `bean-list` 100 beans | 115,602 | 80,306 | 1.44x |
-| `bean-serialize` | 691 | 737 | 持平（噪声内） |
+| `parse` 复杂文档 | 6,608 | 4,807 | **1.37x**（四次运行 1.29–1.70x） |
+| `serialize` 复杂文档 | 4,892 | 4,209 | 1.16x |
+| `parse` 100k 整数数组 | 1,175,471 | 1,024,195 | 1.15x |
+| `bean-list` 100 beans | 68,681 | 45,548 | **1.51x** |
+| `bean-parse` | 937 | 1,055 | 噪声内（单 bean 仅 ~1 μs，判读用 `bean-list`） |
+| `bean-serialize` | 266 | 298 | 持平（噪声内） |
 
 横向：`parse` 从第 4 升到**第 2**，100k 数组解析**第 1**，`bean-list` 第 5 → 第 2，
 `serialize` 仍第 4，`readIntArray` 绝对领先（1,438 ops/sec）。

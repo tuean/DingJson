@@ -193,6 +193,7 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 - [技术架构](docs/architecture.md) —— 设计取舍、核心处理逻辑、代码地图
 - [优化报告](docs/optimization-report.md) —— 每项优化的实测前后对比
 - [基准测试](BENCHMARK.md) / [变更记录](CHANGELOG.md)
+- 自己跑基准：`./bench.sh`（横向对比）/ `./bench.sh ab <旧版本 classes>`（同 JVM A/B）
 
 ## 性能（JDK 25，详见 [BENCHMARK.md](BENCHMARK.md)）
 
@@ -203,6 +204,9 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 | **100k 数组流式 (ms)** | **0.73 🥇** | 1.32 | 2.11 | 2.80 | 8.09 |
 
 流式 `readIntArray` 全面领先（零装箱 + 零中间树）。
+
+> 上表是 1.0.0 基线。当前分支（1.1.0-dev）相对 1.0.0：解析 **1.37x**、序列化 1.16x、
+> 100k 数组 1.15x、100 个 bean 1.51x（同 JVM A/B 实测，见 `BENCHMARK.md` 第 1 节）。
 
 ## Maven
 
