@@ -1,7 +1,11 @@
 # DingJson 顶层 API 增强设计
 
 日期：2026-08-06
-状态：✅ 已实现（2026-08-06，457 测试全绿 + 单文件版冒烟 20 项通过）
+状态：✅ 已实现（2026-08-06，457 测试全绿 + ~~单文件版冒烟 20 项通过~~）
+
+> **注（2026-11-16）**：单文件分发版 `release/DingJson.java` 及其生成脚本已随 1.1.0
+> 移除（改用 Maven 坐标 `io.github.tuean:dingjson`）。下文凡提到"单文件版"的条目均已作废，
+> 保留原文只为记录当时的决策。
 
 ## 背景与目标
 
@@ -142,7 +146,7 @@ static <T> T deepCopy(T value, TypeReference<T> typeRef)  // 精确泛型元素�
 
 - 全部为**新增方法**，零破坏。
 - 静态 API 默认行为不变（仍用 `DEFAULT_CONFIG`，含新加的 size 限制）。
-- 单文件版 `release/DingJson.java` 通过 `python3 tools/generate_single_file.py` 重新生成；该脚本顶部 import 段需补充 `java.io.*`（File/InputStream/OutputStream/Reader）。
+- ~~单文件版 `release/DingJson.java` 通过 `python3 tools/generate_single_file.py` 重新生成；该脚本顶部 import 段需补充 `java.io.*`（File/InputStream/OutputStream/Reader）。~~（单文件版已删除）
 
 ## 测试计划
 
@@ -162,8 +166,8 @@ static <T> T deepCopy(T value, TypeReference<T> typeRef)  // 精确泛型元素�
 
 - README.md：新增「便捷 API」章节（IO、config 重载、eval/isValid/of/deepCopy 示例）。
 - CHANGELOG.md：追加条目。
-- 重新生成 release/DingJson.java 单文件版。
+- ~~重新生成 release/DingJson.java 单文件版。~~（已作废：单文件版已删除）
 
 ## 实现顺序（逐步推进）
 
-1. 方向 B（config 重载）→ 2. 方向 C（eval / of / createWriter）→ 3. C2.5 skip 解析器 + isValid → 4. 方向 A（IO 重载 + mapper 对称）→ 5. 方向 D（deepCopy）→ 6. 测试补齐 → 7. README/CHANGELOG/单文件版重新生成 → 8. 全量验证（clean test）。
+1. 方向 B（config 重载）→ 2. 方向 C（eval / of / createWriter）→ 3. C2.5 skip 解析器 + isValid → 4. 方向 A（IO 重载 + mapper 对称）→ 5. 方向 D（deepCopy）→ 6. 测试补齐 → 7. README/CHANGELOG/~~单文件版重新生成~~ → 8. 全量验证（clean test）。
