@@ -537,15 +537,25 @@ public final class JSONTokener {
         // instead (Gson-style). The strict scalar double path (readDouble)
         // rejects these explicitly.
         if (Double.isInfinite(d)) {
+            java.math.BigDecimal bd;
             try {
-                return new java.math.BigDecimal(text);
+                bd = new java.math.BigDecimal(text);
             } catch (NumberFormatException e) {
                 // absurd exponents (i_number_huge_exp.json) exceed even BigDecimal
                 throw new JSONException("Invalid number: exponent out of range at position " + start);
             }
+            // A huge exponent parses instantly but is a bomb downstream:
+            // toPlainString() on scale -2147483648 allocates 100M+ characters.
+            if (bd.scale() < -MAX_BIG_SCALE || bd.scale() > MAX_BIG_SCALE) {
+                throw new JSONException("Number exponent out of range at position " + start);
+            }
+            return bd;
         }
         return d;
     }
+
+    /** Largest {@code |scale|} accepted for a {@code BigDecimal}. */
+    private static final int MAX_BIG_SCALE = 10_000;
 
     /**
      * Reads a JSON number that must be an integer, returning a raw {@code long}

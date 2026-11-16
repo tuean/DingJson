@@ -33,10 +33,17 @@ public final class DingJsonConfig {
     /** Maximum number of bytes read from byte[]/InputStream/Reader/File inputs (0 = unlimited). */
     private final int maxInputBytes;
 
+    /**
+     * Maximum nesting depth for objects/arrays. Default 512.
+     * Lower it on small thread stacks (containers, virtual threads): 512 levels
+     * of object nesting needs roughly 512 frames and can overflow a 256 KB stack.
+     */
+    private final int maxDepth;
+
     private DingJsonConfig(boolean writeNullFields, String dateFormat,
                            boolean failOnNonFinite, boolean caseInsensitiveFields,
                            int maxStringLength, int maxArraySize, int maxObjectSize,
-                           int maxInputBytes) {
+                           int maxInputBytes, int maxDepth) {
         this.writeNullFields = writeNullFields;
         this.dateFormat = dateFormat;
         this.failOnNonFinite = failOnNonFinite;
@@ -45,16 +52,18 @@ public final class DingJsonConfig {
         this.maxArraySize = maxArraySize;
         this.maxObjectSize = maxObjectSize;
         this.maxInputBytes = maxInputBytes;
+        this.maxDepth = maxDepth;
     }
 
     /**
      * Defaults: write nulls, epoch-millis dates, NaN→null, exact field names,
      * 10 MB max string, 10M max array elements, 1M max object keys,
-     * 10 MB max input size for the byte[]/stream/reader/file entry points.
+     * 10 MB max input size for the byte[]/stream/reader/file entry points,
+     * 512 max nesting depth.
      */
     public static DingJsonConfig defaults() {
         return new DingJsonConfig(true, null, false, false,
-                10_000_000, 10_000_000, 1_000_000, 10_000_000);
+                10_000_000, 10_000_000, 1_000_000, 10_000_000, 512);
     }
 
     public static Builder builder() {
@@ -97,6 +106,10 @@ public final class DingJsonConfig {
         return maxInputBytes;
     }
 
+    public int maxDepth() {
+        return maxDepth;
+    }
+
     /** Builder for {@link DingJsonConfig}. */
     public static final class Builder {
         private boolean writeNullFields;
@@ -107,6 +120,7 @@ public final class DingJsonConfig {
         private int maxArraySize;
         private int maxObjectSize;
         private int maxInputBytes;
+        private int maxDepth;
 
         private Builder(DingJsonConfig base) {
             this.writeNullFields = base.writeNullFields;
@@ -117,6 +131,7 @@ public final class DingJsonConfig {
             this.maxArraySize = base.maxArraySize;
             this.maxObjectSize = base.maxObjectSize;
             this.maxInputBytes = base.maxInputBytes;
+            this.maxDepth = base.maxDepth;
         }
 
         /** Omit {@code null} fields from output (like Jackson's {@code @JsonInclude(NON_NULL)}). */
@@ -182,10 +197,25 @@ public final class DingJsonConfig {
             return this;
         }
 
+        /**
+         * Maximum nesting depth for objects/arrays. Default 512.
+         * Drop to 64-128 on 256 KB stacks (containers, virtual threads) — a deep
+         * payload that the default allows can overflow a small stack and the
+         * resulting {@link StackOverflowError} is far harder to handle than a
+         * {@link com.dingjson.exception.JSONException}. Must be at least 1.
+         */
+        public Builder maxDepth(int value) {
+            if (value < 1) {
+                throw new IllegalArgumentException("maxDepth must be >= 1, got " + value);
+            }
+            this.maxDepth = value;
+            return this;
+        }
+
         public DingJsonConfig build() {
             return new DingJsonConfig(writeNullFields, dateFormat, failOnNonFinite,
                     caseInsensitiveFields, maxStringLength, maxArraySize, maxObjectSize,
-                    maxInputBytes);
+                    maxInputBytes, maxDepth);
         }
     }
 }

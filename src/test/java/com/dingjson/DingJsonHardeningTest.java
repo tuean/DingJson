@@ -298,12 +298,24 @@ public class DingJsonHardeningTest {
     public void mapWithIntegerKeysSerializes() {
         Map<Object, Object> m = new HashMap<>();
         m.put(123, "x");
-        m.put(null, "y");
         String json = DingJson.toJSONString(m);
         Assert.assertTrue(json.contains("\"123\":\"x\""));
-        Assert.assertTrue(json.contains("\"null\":\"y\""));
         // and it must be valid JSON
         DingJson.parse(json);
+    }
+
+    @Test
+    public void nullMapKeyIsRejected() {
+        Map<Object, Object> m = new HashMap<>();
+        m.put(null, "y");
+        // "null" as a key cannot be told apart from the string "null" on the way
+        // back, so it is rejected instead of being silently corrupted.
+        try {
+            DingJson.toJSONString(m);
+            Assert.fail("expected JSONException for a null map key");
+        } catch (JSONException expected) {
+            Assert.assertTrue(expected.getMessage().contains("key"));
+        }
     }
 
     @Test

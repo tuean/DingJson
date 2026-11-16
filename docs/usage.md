@@ -30,7 +30,7 @@
 <dependency>
     <groupId>com.dingjson</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -145,6 +145,20 @@ DingJson.parseObject(inputStream, new TypeReference<Map<String, List<User>>>() {
 ```
 
 `BigDecimal`/`BigInteger` 直接读原始数字文本，不经过 `double`，全精度无损。
+
+**宽松不等于静默损坏**（1.0.1 起）。以下情况会抛 `JSONException` 而不是给出错值：
+
+| 输入 | 目标字段 | 1.0.1 之前 | 现在 |
+|---|---|---|---|
+| `2147483648` | `int` | `-2147483648`（回绕） | 抛异常 |
+| `70000` | `short` | `4464`（截断） | 抛异常 |
+| `1e40` | `long`（`getLong`） | `Long.MAX_VALUE`（饱和） | 抛异常 |
+| `"java.lang.Runtime"` | `Class<?>` | 原样写入 → 读取时 JVM 崩溃 | 抛异常 |
+| `{"x":1}` | 接口/抽象类字段 | 原样写入 → 读取时 JVM 崩溃 | 抛异常 |
+| 任意标量 | 数组字段 | 原样写入 → 读取时 JVM 崩溃 | 抛异常 |
+
+小数进整型字段仍按 Java 规则**截断**（`1.9 → 1`，与 Jackson 一致），
+超出目标类型范围才报错。异常消息带字段名：`Field 'age': For input string: "abc"`。
 
 ---
 
@@ -268,6 +282,11 @@ r.ensureEnded();                              // 校验后面没有垃圾
 | `readNumberRaw()` | 读数字原文（保精度，配合 `BigDecimal`） |
 | `ensureEnded()` | 断言输入已耗尽 |
 
+**上限说明**：`maxArraySize`/`maxObjectSize` 由解析器产出的数组/对象自动检查，
+适用于 `readValue()` 与全部批量方法。若你**手动逐元素循环**（`readBeginArray()` +
+`while (r.peek() != ']')`），元素边界只存在于你的循环里，计数由调用方负责——
+需要硬上限时用 `readValue()` 或批量方法。
+
 ### 7.2 批量数组读取
 
 数值数组走专门的融合扫描，比逐个 `readInt()` 快一个数量级：
@@ -357,6 +376,7 @@ DingJsonConfig config = DingJsonConfig.builder()
         .maxArraySize(100_000)
         .maxObjectSize(10_000)
         .maxInputBytes(2 * 1024 * 1024)
+        .maxDepth(128)
         .build();
 
 DingJson.toJSONString(bean, config);
@@ -373,6 +393,7 @@ DingJson.parseObject(text, User.class, config);
 | `maxArraySize` | `10_000_000` | 数组最大元素数，0 = 不限 |
 | `maxObjectSize` | `1_000_000` | 对象最大键值对数，0 = 不限 |
 | `maxInputBytes` | `10_000_000` | 字节/流/Reader/File 入口最大读入字节数，0 = 不限 |
+| `maxDepth` | `512` | 对象/数组最大嵌套深度（必须 ≥ 1）。小栈环境（容器、虚拟线程）建议 64–128 |
 
 `builder(base)` 可以在已有配置上改一项，其余继承。
 

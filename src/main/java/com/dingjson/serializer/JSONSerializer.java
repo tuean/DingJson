@@ -14,6 +14,7 @@ import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
@@ -450,7 +451,12 @@ public final class JSONSerializer {
 
     /** Converts a map key to a JSON object key string (never throws). */
     private static String jsonKey(Object key) {
-        return key == null ? "null" : key.toString();
+        if (key == null) {
+            // "null" as a key cannot be told apart from the string "null" on the
+            // way back — reject instead of silently corrupting the map.
+            throw new JSONException("JSON object keys must not be null");
+        }
+        return key.toString();
     }
 
     private static void serializeArray(Object array, StringBuilder sb, int depth, DingJsonConfig config) {
@@ -922,10 +928,12 @@ public final class JSONSerializer {
             // Unpaired surrogates must be escaped: writing them raw would make
             // UTF-8 encoders silently replace them with '?', corrupting the
             // value on round-trip. Valid pairs stay raw (2 chars, one append).
+            // U+2028/U+2029 are legal JSON but are line terminators to a JS
+            // engine, so they break out of a <script> context — escape them too.
             boolean loneSurrogate = Character.isSurrogate(c)
                     && !(Character.isHighSurrogate(c) && i + 1 < len
                          && Character.isLowSurrogate(s.charAt(i + 1)));
-            if ((c < 0x80 && ESCAPE[c]) || loneSurrogate) {
+            if ((c < 0x80 && ESCAPE[c]) || c == '\u2028' || c == '\u2029' || loneSurrogate) {
                 switch (c) {
                     case '"':  sb.append("\\\""); break;
                     case '\\': sb.append("\\\\"); break;
@@ -950,6 +958,7 @@ public final class JSONSerializer {
                 while (j < len) {
                     c = s.charAt(j);
                     if (c < 0x80 && ESCAPE[c]) break;
+                    if (c == '\u2028' || c == '\u2029') break;
                     if (Character.isHighSurrogate(c)) {
                         if (j + 1 < len && Character.isLowSurrogate(s.charAt(j + 1))) {
                             j += 2;
@@ -995,18 +1004,34 @@ public final class JSONSerializer {
 
     // ── Streaming deserialization (JSONReader → bean, no tree) ────
 
-    private static final ClassValue<Map<String, FieldInfo>> FIELD_MAP_CACHE =
-            new ClassValue<Map<String, FieldInfo>>() {
-                @Override
-                protected Map<String, FieldInfo> computeValue(Class<?> type) {
-                    Map<String, FieldInfo> map = new HashMap<>();
-                    for (FieldInfo f : fieldsOf(type)) {
-                        map.put(f.jsonName, f);
-                        map.put(f.jsonName.toLowerCase(Locale.ROOT), f); // case-insensitive fallback
-                    }
-                    return map;
-                }
-            };
+    /**
+     * Field lookup tables per class: exact names in one map, lower-cased names in
+     * a second one. They must stay apart — a class declaring both {@code name}
+     * and {@code NAME} would otherwise have its exact entry overwritten by the
+     * other field's lower-cased key, silently writing the wrong field.
+     */
+    private static final ClassValue<FieldMaps> FIELD_MAP_CACHE = new ClassValue<FieldMaps>() {
+        @Override
+        protected FieldMaps computeValue(Class<?> type) {
+            Map<String, FieldInfo> exact = new HashMap<>();
+            Map<String, FieldInfo> lower = new HashMap<>();
+            for (FieldInfo f : fieldsOf(type)) {
+                exact.put(f.jsonName, f);
+                lower.putIfAbsent(f.jsonName.toLowerCase(Locale.ROOT), f);
+            }
+            return new FieldMaps(exact, lower);
+        }
+    };
+
+    private static final class FieldMaps {
+        final Map<String, FieldInfo> exact;
+        final Map<String, FieldInfo> lower;
+
+        FieldMaps(Map<String, FieldInfo> exact, Map<String, FieldInfo> lower) {
+            this.exact = exact;
+            this.lower = lower;
+        }
+    }
 
     /**
      * Deserializes a JSON value from a streaming {@link JSONReader} into the
@@ -1031,12 +1056,18 @@ public final class JSONSerializer {
 
     @SuppressWarnings("unchecked")
     private static Object deserializeFromReader(JSONReader reader, Class<?> targetType, int depth, DingJsonConfig config) {
-        if (depth > JSONParser.MAX_DEPTH) {
-            throw new JSONException("Exceeded maximum nesting depth of " + JSONParser.MAX_DEPTH);
+        int maxDepth = config != null ? config.maxDepth() : JSONParser.MAX_DEPTH;
+        if (depth > maxDepth) {
+            throw new JSONException("Exceeded maximum nesting depth of " + maxDepth);
         }
         if (reader.peek() == 'n') {
             reader.readNull();
             return null;
+        }
+        if (targetType.isArray()) {
+            // Array classes report ABSTRACT in their modifiers, so they must be
+            // routed to the tree converter before the "cannot instantiate" path.
+            return deserialize(reader.readValue(), targetType, config);
         }
         if (targetType == JSONObject.class) {
             return reader.readJSONObject();
@@ -1082,8 +1113,10 @@ public final class JSONSerializer {
             return Boolean.parseBoolean(reader.readString());
         }
         if (type == int.class || type == Integer.class) {
-            if (c == '-' || (c >= '0' && c <= '9')) return reader.readInt();
-            return Integer.parseInt(reader.readString());
+            // readLong + range check: reader.readInt() would wrap 2147483648 to
+            // -2147483648 and hand a silent data corruption to the caller.
+            if (c == '-' || (c >= '0' && c <= '9')) return toIntExact(reader.readLong());
+            return toIntExact(Long.parseLong(reader.readString()));
         }
         if (type == long.class || type == Long.class) {
             if (c == '-' || (c >= '0' && c <= '9')) return reader.readLong();
@@ -1098,12 +1131,12 @@ public final class JSONSerializer {
             return Float.parseFloat(reader.readString());
         }
         if (type == short.class || type == Short.class) {
-            if (c == '-' || (c >= '0' && c <= '9')) return (short) reader.readInt();
-            return Short.parseShort(reader.readString());
+            if (c == '-' || (c >= '0' && c <= '9')) return toShortExact(reader.readLong());
+            return toShortExact(Long.parseLong(reader.readString()));
         }
         if (type == byte.class || type == Byte.class) {
-            if (c == '-' || (c >= '0' && c <= '9')) return (byte) reader.readInt();
-            return Byte.parseByte(reader.readString());
+            if (c == '-' || (c >= '0' && c <= '9')) return toByteExact(reader.readLong());
+            return toByteExact(Long.parseLong(reader.readString()));
         }
         if (type == char.class || type == Character.class) {
             String s = reader.readString();
@@ -1132,7 +1165,7 @@ public final class JSONSerializer {
             // read the raw text — parsing to Double would lose precision
             String s = (c == '-' || (c >= '0' && c <= '9'))
                     ? reader.readNumberRaw() : reader.readString();
-            return new BigDecimal(s);
+            return checkedBigDecimal(new BigDecimal(s));
         }
         if (type == BigInteger.class) {
             String s = (c == '-' || (c >= '0' && c <= '9'))
@@ -1150,14 +1183,16 @@ public final class JSONSerializer {
 
     @SuppressWarnings("unchecked")
     private static <T> T deserializeBean(JSONReader reader, Class<T> targetType, int depth, DingJsonConfig config) {
+        if (targetType.isArray()) {
+            return (T) deserialize(reader.readValue(), targetType, config);
+        }
         if (targetType.isInterface() || Modifier.isAbstract(targetType.getModifiers())) {
-            // Cannot instantiate — keep the raw value (best effort)
-            return (T) reader.readValue();
+            throw new JSONException("Cannot deserialize into abstract type " + targetType.getName());
         }
         try {
             reader.readBeginObject();
             T instance = newInstanceOf(targetType);
-            Map<String, FieldInfo> fields = fieldMap(targetType);
+            FieldMaps fields = fieldMap(targetType);
             boolean caseInsensitive = config != null && config.caseInsensitiveFields();
             int maxKeys = config != null ? config.maxObjectSize() : 0;
             int keyCount = 0;
@@ -1166,14 +1201,18 @@ public final class JSONSerializer {
                     throw new JSONException("Object size exceeds maximum allowed " + maxKeys);
                 }
                 String key = reader.readKey();
-                FieldInfo field = fields.get(key);
+                FieldInfo field = fields.exact.get(key);
                 if (field == null && caseInsensitive) {
-                    field = fields.get(key.toLowerCase(Locale.ROOT));
+                    field = fields.lower.get(key.toLowerCase(Locale.ROOT));
                 }
                 if (field == null || !field.deserializable) {
                     reader.skipValue();
                 } else {
-                    putField(instance, field, readFieldValue(reader, field, depth + 1, config));
+                    try {
+                        putField(instance, field, readFieldValue(reader, field, depth + 1, config));
+                    } catch (Exception e) {
+                        throw fieldError(field, e);
+                    }
                 }
             }
             reader.readEndObject();
@@ -1213,13 +1252,19 @@ public final class JSONSerializer {
         if (isScalar(type)) {
             return readScalar(reader, type);
         }
+        if (type.isArray()) {
+            // Before the abstract check: array classes carry ABSTRACT in their
+            // modifiers, and returning the raw JSONArray here put a List where a
+            // real array was expected (reading .length then crashed the JVM).
+            return deserialize(reader.readValue(), f.field.getGenericType(), config);
+        }
         if (type.isInterface() || Modifier.isAbstract(type.getModifiers())) {
-            return reader.readValue();
+            throw new JSONException("Cannot deserialize into abstract type " + type.getName());
         }
         return deserializeFromReader(reader, type, depth, config); // nested bean (null-safe)
     }
 
-    private static Map<String, FieldInfo> fieldMap(Class<?> clazz) {
+    private static FieldMaps fieldMap(Class<?> clazz) {
         return FIELD_MAP_CACHE.get(clazz);
     }
 
@@ -1229,6 +1274,14 @@ public final class JSONSerializer {
      */
     @SuppressWarnings("unchecked")
     private static void putField(Object bean, FieldInfo f, Object value) {
+        // Unsafe writes bypass the JVM's own field-type check. Without this guard
+        // a value the converter could not handle lands in the field as-is and the
+        // next read of that field crashes the JVM (SIGSEGV/SIGBUS) — reflection
+        // would have thrown IllegalArgumentException here instead.
+        if (value != null && !f.type.isPrimitive() && !f.type.isInstance(value)) {
+            throw new JSONException("Cannot set field '" + f.name + "' of type "
+                    + f.type.getName() + " from " + value.getClass().getName());
+        }
         if (UnsafeFields.AVAILABLE) {
             try {
                 switch (f.kind) {
@@ -1316,8 +1369,14 @@ public final class JSONSerializer {
                 return (T) map;
             }
 
-            // Custom parameterized class — fall back to its raw type
-            return (T) convert(source, (Class<?>) raw);
+            // Custom parameterized class: keep the type arguments so its `T`
+            // fields are converted to what the caller asked for.
+            Class<?> rawClass = (Class<?>) raw;
+            if (source instanceof JSONObject) {
+                return (T) deserializeBean((JSONObject) source, rawClass,
+                        typeVarBindings(rawClass, args), config);
+            }
+            return (T) convert(source, rawClass);
         }
 
         if (targetType instanceof Class) {
@@ -1407,34 +1466,94 @@ public final class JSONSerializer {
     /** Instantiates the target bean and maps fields (generic-aware). */
     @SuppressWarnings("unchecked")
     private static <T> T deserializeBean(JSONObject source, Class<T> targetType) {
+        return deserializeBean(source, targetType, Collections.<TypeVariable<?>, Type>emptyMap(), null);
+    }
+
+    /**
+     * Instantiates the target bean and maps fields, substituting any bound type
+     * variables so a {@code T} field is converted to the requested argument
+     * instead of keeping the raw JSON value.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T deserializeBean(JSONObject source, Class<T> targetType,
+                                         Map<TypeVariable<?>, Type> bindings,
+                                         DingJsonConfig config) {
         com.dingjson.codec.DingJsonCodec<Object> codec = codecOf(targetType);
         if (codec != null) {
-            return (T) codec.read(source, null);
+            return (T) codec.read(source, config);
         }
+        T instance;
         try {
-            T instance = newInstanceOf(targetType);
-            for (FieldInfo f : fieldsOf(targetType)) {
-                if (!f.deserializable) continue;
-                if (!source.containsKey(f.jsonName)) continue;
-                Object raw = source.get(f.jsonName);
+            instance = newInstanceOf(targetType);
+        } catch (JSONException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new JSONException("Cannot deserialize to " + targetType, e);
+        }
+        for (FieldInfo f : fieldsOf(targetType)) {
+            if (!f.deserializable) continue;
+            if (!source.containsKey(f.jsonName)) continue;
+            Object raw = source.get(f.jsonName);
+            try {
                 Object typed;
                 if (raw instanceof String && f.format.length() > 0 && f.type == Date.class) {
                     // Same as the streaming path: honour @JSONField(format) so a
                     // bean the writer produced can be read back.
                     typed = parseDate((String) raw, dateFormatter(f.format));
                 } else {
-                    typed = deserialize(raw, f.field.getGenericType());
+                    typed = deserialize(raw, resolveType(f.field.getGenericType(), bindings), config);
                 }
                 if (typed != null || raw == null) {
                     putField(instance, f, typed);
                 }
+            } catch (Exception e) {
+                throw fieldError(f, e);
             }
-            return instance;
-        } catch (JSONException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new JSONException("Cannot deserialize to " + targetType, e);
         }
+        return instance;
+    }
+
+    /** Prefixes a conversion failure with the field it came from. */
+    private static JSONException fieldError(FieldInfo f, Exception cause) {
+        return new JSONException("Field '" + f.jsonName + "': " + cause.getMessage(), cause);
+    }
+
+    /** Maps a parameterized class's type variables to its actual arguments. */
+    private static Map<TypeVariable<?>, Type> typeVarBindings(Class<?> raw, Type[] args) {
+        TypeVariable<?>[] vars = raw.getTypeParameters();
+        if (vars.length == 0 || args.length != vars.length) {
+            return Collections.emptyMap();
+        }
+        Map<TypeVariable<?>, Type> map = new HashMap<>();
+        for (int i = 0; i < vars.length; i++) {
+            map.put(vars[i], args[i]);
+        }
+        return map;
+    }
+
+    /** Substitutes bound type variables inside a field's generic type. */
+    private static Type resolveType(Type type, Map<TypeVariable<?>, Type> bindings) {
+        if (bindings.isEmpty()) return type;
+        if (type instanceof TypeVariable) {
+            Type bound = bindings.get(type);
+            return bound != null ? bound : type;
+        }
+        if (type instanceof ParameterizedType) {
+            ParameterizedType pt = (ParameterizedType) type;
+            Type[] args = pt.getActualTypeArguments();
+            Type[] resolved = new Type[args.length];
+            boolean changed = false;
+            for (int i = 0; i < args.length; i++) {
+                resolved[i] = resolveType(args[i], bindings);
+                changed |= resolved[i] != args[i];
+            }
+            // shortcut: only List<E> gets a rebuilt Type; Map<K,V> keeps its raw
+            // form, whose unresolved variables still fall back to identity.
+            if (changed && args.length == 1 && pt.getRawType() == List.class) {
+                return listOf(resolved[0]);
+            }
+        }
+        return type;
     }
 
     /** A {@link ParameterizedType} for {@code List<T>}. */
@@ -1475,15 +1594,35 @@ public final class JSONSerializer {
             return deserializeBean((JSONObject) value, targetType);
         }
 
-        // Number conversions
+        // Number conversions — narrowing is range-checked: Number.intValue()
+        // and friends wrap silently (2147483648 → -2147483648), which corrupts
+        // data and lets payloads bypass downstream numeric validation.
         if (value instanceof Number) {
             Number n = (Number) value;
-            if (targetType == int.class || targetType == Integer.class) return n.intValue();
-            if (targetType == long.class || targetType == Long.class) return n.longValue();
-            if (targetType == double.class || targetType == Double.class) return n.doubleValue();
-            if (targetType == float.class || targetType == Float.class) return n.floatValue();
-            if (targetType == short.class || targetType == Short.class) return n.shortValue();
-            if (targetType == byte.class || targetType == Byte.class) return n.byteValue();
+            if (targetType == int.class || targetType == Integer.class) {
+                return (int) exactInRange(n, Integer.MIN_VALUE, Integer.MAX_VALUE, "int");
+            }
+            if (targetType == long.class || targetType == Long.class) return exactLong(n);
+            if (targetType == double.class || targetType == Double.class) {
+                double d = n.doubleValue();
+                if (Double.isInfinite(d)) {
+                    throw new JSONException("Value out of range for double: " + n);
+                }
+                return d;
+            }
+            if (targetType == float.class || targetType == Float.class) {
+                float f = n.floatValue();
+                if (Float.isInfinite(f)) {
+                    throw new JSONException("Value out of range for float: " + n);
+                }
+                return f;
+            }
+            if (targetType == short.class || targetType == Short.class) {
+                return (short) exactInRange(n, Short.MIN_VALUE, Short.MAX_VALUE, "short");
+            }
+            if (targetType == byte.class || targetType == Byte.class) {
+                return (byte) exactInRange(n, Byte.MIN_VALUE, Byte.MAX_VALUE, "byte");
+            }
         }
 
         // String conversions
@@ -1522,11 +1661,11 @@ public final class JSONSerializer {
             if (value instanceof String) return UUID.fromString((String) value);
         }
         if (targetType == BigDecimal.class) {
-            if (value instanceof Number) return new BigDecimal(value.toString());
-            if (value instanceof String) return new BigDecimal((String) value);
+            if (value instanceof Number) return checkedBigDecimal(new BigDecimal(value.toString()));
+            if (value instanceof String) return checkedBigDecimal(new BigDecimal((String) value));
         }
         if (targetType == BigInteger.class) {
-            if (value instanceof Number) return BigInteger.valueOf(((Number) value).longValue());
+            if (value instanceof Number) return new BigDecimal(value.toString()).toBigIntegerExact();
             if (value instanceof String) return new BigInteger((String) value);
         }
         if (targetType == LocalDate.class && value instanceof String) return LocalDate.parse((String) value);
@@ -1547,6 +1686,86 @@ public final class JSONSerializer {
             return Boolean.parseBoolean(value.toString());
         }
 
-        return value;
+        // Anything left is a type mismatch. Returning the raw value here used to
+        // let a JSON node land in an unrelated field (type confusion); fail loudly.
+        throw new JSONException("Cannot convert " + typeName(value) + " to " + targetType.getName());
     }
+
+    /**
+     * Long conversion that refuses to wrap or saturate: an out-of-range value
+     * throws instead of becoming {@code Long.MAX_VALUE}.
+     */
+    static long exactLong(Number n) {
+        if (n instanceof Long || n instanceof Integer || n instanceof Short || n instanceof Byte) {
+            return n.longValue();
+        }
+        if (n instanceof BigInteger) {
+            BigInteger bi = (BigInteger) n;
+            if (bi.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0
+                    || bi.compareTo(BigInteger.valueOf(Long.MIN_VALUE)) < 0) {
+                throw new JSONException("Value out of range for long: " + n);
+            }
+            return bi.longValue();
+        }
+        if (n instanceof BigDecimal) {
+            BigDecimal bd = (BigDecimal) n;
+            if (bd.compareTo(BIG_LONG_MAX) > 0 || bd.compareTo(BIG_LONG_MIN) < 0) {
+                throw new JSONException("Value out of range for long: " + n);
+            }
+            return bd.longValue();
+        }
+        double d = n.doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d)
+                || d < Long.MIN_VALUE || d > Long.MAX_VALUE) {
+            throw new JSONException("Value out of range for long: " + n);
+        }
+        return (long) d;
+    }
+
+    private static int toIntExact(long v) {
+        if (v < Integer.MIN_VALUE || v > Integer.MAX_VALUE) {
+            throw new JSONException("Value out of range for int: " + v);
+        }
+        return (int) v;
+    }
+
+    private static short toShortExact(long v) {
+        if (v < Short.MIN_VALUE || v > Short.MAX_VALUE) {
+            throw new JSONException("Value out of range for short: " + v);
+        }
+        return (short) v;
+    }
+
+    private static byte toByteExact(long v) {
+        if (v < Byte.MIN_VALUE || v > Byte.MAX_VALUE) {
+            throw new JSONException("Value out of range for byte: " + v);
+        }
+        return (byte) v;
+    }
+
+    private static long exactInRange(Number n, long min, long max, String typeName) {
+        long v = exactLong(n);
+        if (v < min || v > max) {
+            throw new JSONException("Value out of range for " + typeName + ": " + n);
+        }
+        return v;
+    }
+
+    private static final BigDecimal BIG_LONG_MAX = BigDecimal.valueOf(Long.MAX_VALUE);
+    private static final BigDecimal BIG_LONG_MIN = BigDecimal.valueOf(Long.MIN_VALUE);
+
+    /**
+     * Rejects {@code BigDecimal}s whose scale would make downstream code explode:
+     * {@code 1e2147483648} parses in microseconds but {@code toPlainString()} on
+     * it is an instant OOM, and {@code setScale} throws ArithmeticException.
+     */
+    static BigDecimal checkedBigDecimal(BigDecimal bd) {
+        if (bd.scale() < -MAX_EXPONENT || bd.scale() > MAX_EXPONENT) {
+            throw new JSONException("Number exponent out of range: " + bd);
+        }
+        return bd;
+    }
+
+    /** Largest |scale| accepted for a {@code BigDecimal}. */
+    private static final int MAX_EXPONENT = 10_000;
 }

@@ -70,35 +70,29 @@ public class JSONObject extends JsonElement implements Map<String, Object> {
         return v != null ? v.toString() : null;
     }
 
+    /**
+     * Numeric getters delegate to the shared converter so they reject
+     * out-of-range values instead of wrapping/saturating them
+     * ({@code 1e40} used to come back as {@code Long.MAX_VALUE}).
+     */
     public Integer getInteger(String key) {
         Object v = map.get(key);
-        if (v == null) return null;
-        if (v instanceof Integer) return (Integer) v;
-        if (v instanceof Number) return ((Number) v).intValue();
-        return Integer.parseInt(v.toString());
+        return v == null ? null : JSONSerializer.deserialize(v, Integer.class);
     }
 
     public Long getLong(String key) {
         Object v = map.get(key);
-        if (v == null) return null;
-        if (v instanceof Long) return (Long) v;
-        if (v instanceof Number) return ((Number) v).longValue();
-        return Long.parseLong(v.toString());
+        return v == null ? null : JSONSerializer.deserialize(v, Long.class);
     }
 
     public Double getDouble(String key) {
         Object v = map.get(key);
-        if (v == null) return null;
-        if (v instanceof Double) return (Double) v;
-        if (v instanceof Number) return ((Number) v).doubleValue();
-        return Double.parseDouble(v.toString());
+        return v == null ? null : JSONSerializer.deserialize(v, Double.class);
     }
 
     public Boolean getBoolean(String key) {
         Object v = map.get(key);
-        if (v == null) return null;
-        if (v instanceof Boolean) return (Boolean) v;
-        return Boolean.parseBoolean(v.toString());
+        return v == null ? null : JSONSerializer.deserialize(v, Boolean.class);
     }
 
     public JSONObject getJSONObject(String key) {

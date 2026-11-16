@@ -28,7 +28,10 @@ public class ExplicitCodecRegistrationTest {
     }
 
     /** Hand-written codec that is deliberately distinguishable from reflection. */
-    private static final class UpperCaseCodec implements DingJsonCodec<Plain> {
+    // package-private on purpose: a `private` nested class needs a synthetic
+    // accessor constructor whose name javac derives from the compilation unit's
+    // state, which makes the compiled test brittle across incremental builds.
+    static final class UpperCaseCodec implements DingJsonCodec<Plain> {
         @Override
         public void write(Plain bean, StringBuilder out, int depth, DingJsonConfig config) {
             out.append("{\"A\":").append(bean.a).append(",\"B\":");

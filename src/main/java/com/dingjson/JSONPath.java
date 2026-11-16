@@ -3,6 +3,7 @@ package com.dingjson;
 import com.dingjson.element.JSONArray;
 import com.dingjson.element.JSONObject;
 import com.dingjson.exception.JSONException;
+import com.dingjson.serializer.JSONSerializer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -98,22 +99,9 @@ public final class JSONPath {
         if (clazz.isInstance(v)) {
             return clazz.cast(v);
         }
-        if (clazz == String.class) {
-            return (T) v.toString();
-        }
-        if (clazz == int.class || clazz == Integer.class) {
-            return (T) Integer.valueOf(((Number) v).intValue());
-        }
-        if (clazz == long.class || clazz == Long.class) {
-            return (T) Long.valueOf(((Number) v).longValue());
-        }
-        if (clazz == double.class || clazz == Double.class) {
-            return (T) Double.valueOf(((Number) v).doubleValue());
-        }
-        if (clazz == boolean.class || clazz == Boolean.class) {
-            return (T) Boolean.valueOf(v.toString());
-        }
-        throw new JSONException("Cannot convert " + v.getClass() + " to " + clazz);
+        // Same converter as field mapping: handles String↔number, enums and
+        // throws JSONException instead of a raw ClassCastException.
+        return (T) JSONSerializer.deserialize(v, clazz);
     }
 
     // ── Internals ─────────────────────────────────────────────────

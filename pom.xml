@@ -6,7 +6,7 @@
 
     <groupId>com.dingjson</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>DingJson</name>
@@ -136,13 +136,23 @@
                     <source>8</source>
                     <target>8</target>
                     <encoding>UTF-8</encoding>
-                    <!-- JDK 23+ no longer runs processors found on the classpath by
-                         default; the DingJson codec processor must run for beans
-                         annotated with @DingJsonSerializable. -->
-                    <compilerArgs>
-                        <arg>-proc:full</arg>
-                    </compilerArgs>
                 </configuration>
+                <!-- JDK 23+ no longer runs processors found on the classpath by
+                     default; the DingJson codec processor must run for beans
+                     annotated with @DingJsonSerializable. Only test-compile needs
+                     it: the main sources ship the processor itself, and enabling it
+                     there makes the first build after `clean` fail (the service file
+                     is copied before the class exists). -->
+                <executions>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <arg>-proc:full</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <plugin>

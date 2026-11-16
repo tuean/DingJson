@@ -210,7 +210,7 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 <dependency>
     <groupId>com.dingjson</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 

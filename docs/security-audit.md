@@ -1,6 +1,6 @@
 # DingJson 安全审计报告
 
-- **审计对象**：DingJson 1.0.0（分支 `perf/compiler-runtime-optimization`）
+- **审计对象**：DingJson 1.0.1（分支 `perf/compiler-runtime-optimization`）
 - **审计方式**：白盒 + 黑盒。读源码定位防御点，再用恶意载荷实测（226 条攻击用例 + 定向复现）
 - **运行环境**：OpenJDK 25.0.2 / G1 / macOS AArch64，默认配置（`Unsafe` 路径）
 - **授权**：代码库所有者自行发起，仅在本机隔离环境执行
@@ -10,8 +10,28 @@
 
 ## 发现总表
 
-| ID | 等级 | 问题 | 影响 |
-|---|---|---|---|
+> **修复状态**：V1–V13 已在 **1.0.1** 修复，POC 全部转成回归测试
+> `src/test/java/com/dingjson/DingJsonTypeSafetyTest.java`（25 例，Unsafe 与
+> `-Ddingjson.unsafe=false` 两条路径各跑一遍）。V14 见文末说明——属于低层流式
+> API 的显式契约，不做代码改动，只在 `usage.md` 里写清边界。
+> 下方各节保留原始的载荷与实测数据，修复方式见 `CHANGELOG.md` 1.0.1 条目。
+
+| ID | 等级 | 问题 | 影响 | 状态 |
+|---|---|---|---|---|
+| **V1** | **P0** | `putField` 无类型校验 + 转换失败返回原值 → 任意类型写入任意引用字段 | **JVM SIGSEGV / SIGBUS，进程崩溃** | ✅ 1.0.1 |
+| V2 | P1 | 窄整型静默截断（`int/short/byte`） | 数据损坏，可绕过数值校验 | ✅ 1.0.1 |
+| V3 | P1 | `getInteger`/`getLong` 饱和/回绕 | 静默错值 | ✅ 1.0.1 |
+| V4 | P1 | 泛型擦除的 `T` 字段塞原值 | 调用点 `ClassCastException` | ✅ 1.0.1 |
+| V5 | P1 | 数组元素转换失败 → `null` | 静默丢数据 | ✅ 1.0.1 |
+| V6 | P2 | `BigDecimal` 接受极端指数 | 下游 `setScale` 炸 / `toPlainString` 撑爆内存 | ✅ 1.0.1 |
+| V7 | P2 | `parse(String)` 不捕获 `StackOverflowError` | 小栈线程下 `Error` 逃逸 | ✅ 1.0.1 |
+| V8 | P2 | 深度上限 512 对 256 KB 栈不安全 | 同上，且是否触发取决于 JIT 状态 | ✅ 1.0.1（`maxDepth` 可配） |
+| V9 | P3 | 大小写变体字段名污染精确匹配 | 字段错位写入 | ✅ 1.0.1 |
+| V10 | P3 | `JSONPath.eval(..., Class)` 抛裸 `ClassCastException` | 契约违背，500 而非 400 | ✅ 1.0.1 |
+| V11 | P3 | 字段级错误消息不含字段名 | 安全审计不可用 | ✅ 1.0.1 |
+| V12 | P3 | `U+2028`/`U+2029` 不转义 | `<script>` 内嵌场景的 XSS 载体 | ✅ 1.0.1 |
+| V13 | P3 | `null` Map 键输出 `"null"` | 键语义丢失 | ✅ 1.0.1 |
+| V14 | P3 | 流式手动循环不受 `maxArraySize` 约束 | 上限可绕过（需文档说明） | 📄 文档说明 |
 | **V1** | **P0** | `putField` 无类型校验 + 转换失败返回原值 → 任意类型写入任意引用字段 | **JVM SIGSEGV / SIGBUS，进程崩溃** |
 | V2 | P1 | 窄整型静默截断（`int/short/byte`） | 数据损坏，可绕过数值校验 |
 | V3 | P1 | `getInteger`/`getLong` 饱和/回绕 | 静默错值 |
@@ -367,6 +387,28 @@ manual readValue loop      →  返回 10        ✗
 
 修复后应把本报告的 POC 全部转成回归测试（`DingJsonSecurityTest` 或新增
 `DingJsonTypeSafetyTest`），并在两套路径（Unsafe / `-Ddingjson.unsafe=false`）下都跑。
+
+## V14 的处理方式（不修代码）
+
+`maxArraySize` 在**解析器自己产出数组**的所有路径上生效：`parse`/`parseArray`、
+`JSONReader.readValue()`、批量方法（`readIntArray`/`readLongArray`/`readDoubleArray`/
+`readStringArray`/`readObjectArray`）。
+
+唯一不生效的是**调用方手动逐元素循环**：
+
+```java
+r.readBeginArray();
+while (r.peek() != ']') { r.readString(); r.skipComma(); }   // 不计数
+r.readEndArray();
+```
+
+这种模式下"元素"只存在于调用方的 `while` 里，读取器看不到边界。要强制计数就得让
+`skipComma()` 维护数组/对象的嵌套状态栈，而 `skipComma()` 同时用于对象成员分隔，
+计数会把对象成员数混进数组元素数（`[{a,b},{c,d}]` 直接误报）。
+
+结论：这是**低层 API 的显式契约**——用 `readValue()`/批量方法即自动受上限保护，
+手动循环由调用方负责。`docs/usage.md` 的流式章节已写明。这不算漏洞：要触发它，
+攻击者必须能让服务端代码改写查询循环，与"已能执行任意循环"等价。
 
 ## 复现方式
 
