@@ -2,6 +2,21 @@
 
 All notable changes to DingJson are documented here.
 
+## [未发布]
+
+### Added
+- **编译期 codec 生成**：给类加 `@DingJsonSerializable`，注解处理器生成
+  `<类名>$$DingJsonCodec`（直线代码，无反射分派），运行期自动发现、找不到即回退反射。
+  生成失败（私有/`final` 字段、泛型、抽象类）只发 NOTE 不阻断构建；
+  `-Ddingjson.codec.disabled=true` 可关闭
+- **bean 序列化热路径**：字段 key 预引用（`"name":` 一次构建）、无参构造器缓存、
+  `serialize()` 改为 `ClassValue` 分发表
+
+### Fixed
+- **树路径不认 `@JSONField(format)`**：`parseObject(text, TypeReference)` 遇到
+  `Date` + `@JSONField(format = "yyyy-MM-dd")` 时抛 `NumberFormatException`
+  （`Long.parseLong("2025-01-01")`），写得出却读不回；现在与流式路径一致
+
 ## [1.0.0] — 2026-10-22 (企业级基线)
 
 ### Security (安全加固 — 审计修复 P0–P3)

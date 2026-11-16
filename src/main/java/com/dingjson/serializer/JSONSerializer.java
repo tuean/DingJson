@@ -64,6 +64,40 @@ public final class JSONSerializer {
         }
     };
 
+    /** Marker for "this class has no generated codec" (ClassValue cannot cache null). */
+    private static final Object NO_CODEC = new Object();
+
+    /**
+     * Compile-time generated codecs, resolved once per class.
+     * <p>
+     * The annotation processor emits {@code <BinaryName>$$DingJsonCodec} for
+     * {@link com.dingjson.annotation.DingJsonSerializable} beans. Discovery is a
+     * single {@code Class.forName} on first use of the class, then a cache hit,
+     * and a missing codec costs nothing afterwards. {@code -Ddingjson.codec=false}
+     * disables the lookup entirely (the reflective path is always available).
+     */
+    private static final ClassValue<Object> CODEC_CACHE = new ClassValue<Object>() {
+        @Override
+        protected Object computeValue(Class<?> type) {
+            if (Boolean.getBoolean("dingjson.codec.disabled")) {
+                return NO_CODEC;
+            }
+            try {
+                Class<?> generated = Class.forName(type.getName() + "$$DingJsonCodec",
+                        true, type.getClassLoader());
+                return generated.getDeclaredConstructor().newInstance();
+            } catch (Throwable ignored) {
+                return NO_CODEC; // not annotated, processor did not run, or codec unavailable
+            }
+        }
+    };
+
+    @SuppressWarnings("unchecked")
+    private static com.dingjson.codec.DingJsonCodec<Object> codecOf(Class<?> type) {
+        Object codec = CODEC_CACHE.get(type);
+        return codec == NO_CODEC ? null : (com.dingjson.codec.DingJsonCodec<Object>) codec;
+    }
+
     /**
      * Zero-argument constructors, looked up once per class: bean instantiation
      * runs per parsed instance, and {@code getDeclaredConstructor()} resolves
@@ -198,6 +232,11 @@ public final class JSONSerializer {
         return est > Integer.MAX_VALUE - 8 ? Integer.MAX_VALUE - 8 : (int) est;
     }
 
+    /** Serializes a value into an existing buffer on behalf of a generated codec. */
+    static void serializeValue(Object value, StringBuilder sb, int depth, DingJsonConfig config) {
+        serialize(value, sb, depth, config);
+    }
+
     /** Serializes a value into an existing buffer (used by JSONWriter). */
     static void serializeTo(Object value, StringBuilder sb) {
         try {
@@ -212,8 +251,38 @@ public final class JSONSerializer {
         serialize(value, sb, 0, config);
     }
 
-    /**
-     * Serializes {@code value}. Cycle protection uses a recursion-depth bound
+    // ── Runtime dispatch table ─────────────────────────────────────
+    // Every value used to be matched against a chain of up to ~12 instanceof
+    // checks. The class-to-kind mapping is a property of the class, so it is
+    // computed once per class and cached: the hot path becomes one lookup plus
+    // a jump table. Precedence mirrors the old chain exactly (JSONObject is a
+    // Map, JSONArray is a Collection).
+    private static final int D_STRING = 0, D_NUMBER = 1, D_BOOLEAN = 2, D_CHAR = 3,
+            D_DATE = 4, D_CALENDAR = 5, D_UUID = 6, D_TEMPORAL = 7,
+            D_JSON_OBJECT = 8, D_JSON_ARRAY = 9, D_MAP = 10, D_COLLECTION = 11,
+            D_ARRAY = 12, D_BEAN = 13;
+
+    private static final ClassValue<Integer> DISPATCH_CACHE = new ClassValue<Integer>() {
+        @Override
+        protected Integer computeValue(Class<?> type) {
+            if (type == String.class) return D_STRING;
+            if (Number.class.isAssignableFrom(type)) return D_NUMBER;
+            if (type == Boolean.class) return D_BOOLEAN;
+            if (type == Character.class) return D_CHAR;
+            if (Date.class.isAssignableFrom(type)) return D_DATE;
+            if (Calendar.class.isAssignableFrom(type)) return D_CALENDAR;
+            if (type == UUID.class) return D_UUID;
+            if (java.time.temporal.TemporalAccessor.class.isAssignableFrom(type)) return D_TEMPORAL;
+            if (JSONObject.class.isAssignableFrom(type)) return D_JSON_OBJECT;
+            if (JSONArray.class.isAssignableFrom(type)) return D_JSON_ARRAY;
+            if (Map.class.isAssignableFrom(type)) return D_MAP;
+            if (Collection.class.isAssignableFrom(type)) return D_COLLECTION;
+            if (type.isArray()) return D_ARRAY;
+            return D_BEAN;
+        }
+    };
+
+    /** Serializes {@code value}. Cycle protection uses a recursion-depth bound
      * (aligned with the parser's {@link JSONParser#MAX_DEPTH}) instead of an
      * identity set: a genuine cycle recurses forever and trips the bound,
      * while re-sharing the same object on different branches (a DAG) stays
@@ -224,45 +293,66 @@ public final class JSONSerializer {
     private static void serialize(Object value, StringBuilder sb, int depth, DingJsonConfig config) {
         if (value == null) {
             sb.append("null");
-        } else if (value instanceof String) {
+            return;
+        }
+        if (value instanceof String) { // the dominant value type: no lookup needed
             appendQuoted(sb, (String) value);
-        } else if (value instanceof Number) {
-            appendNumber((Number) value, sb);
-        } else if (value instanceof Boolean) {
-            sb.append(value);
-        } else if (value instanceof Character) {
-            // char is a 1-char string in JSON (not a bean — Character's
-            // internal fields are not serializable data)
-            sb.append(quote(String.valueOf(value)));
-        } else if (value instanceof Date) {
-            // java.util.Date (and subclasses) → epoch millis (valid JSON number)
-            sb.append(((Date) value).getTime());
-        } else if (value instanceof Calendar) {
-            sb.append(((Calendar) value).getTimeInMillis());
-        } else if (value instanceof UUID) {
-            appendQuoted(sb, value.toString());
-        } else if (value instanceof java.time.temporal.TemporalAccessor) {
-            // LocalDate / LocalDateTime / Instant / OffsetDateTime → ISO-8601 string
-            appendQuoted(sb, value.toString());
-        } else {
-            if (depth > MAX_SERIALIZE_DEPTH) {
-                throw new JSONException("Circular reference or nesting too deep: "
-                        + value.getClass().getName());
-            }
-            if (value instanceof JSONObject) {
+            return;
+        }
+        int kind = DISPATCH_CACHE.get(value.getClass());
+        switch (kind) {
+            case D_NUMBER:
+                appendNumber((Number) value, sb);
+                return;
+            case D_BOOLEAN:
+                sb.append(value);
+                return;
+            case D_STRING:
+                appendQuoted(sb, (String) value);
+                return;
+            case D_CHAR:
+                // char is a 1-char string in JSON (not a bean — Character's
+                // internal fields are not serializable data)
+                sb.append(quote(String.valueOf(value)));
+                return;
+            case D_DATE:
+                // java.util.Date (and subclasses) → epoch millis (valid JSON number)
+                sb.append(((Date) value).getTime());
+                return;
+            case D_CALENDAR:
+                sb.append(((Calendar) value).getTimeInMillis());
+                return;
+            case D_UUID:
+            case D_TEMPORAL:
+                // UUID / LocalDate / LocalDateTime / Instant → ISO-8601 string
+                appendQuoted(sb, value.toString());
+                return;
+            default:
+                break;
+        }
+        if (depth > MAX_SERIALIZE_DEPTH) {
+            throw new JSONException("Circular reference or nesting too deep: "
+                    + value.getClass().getName());
+        }
+        switch (kind) {
+            case D_JSON_OBJECT:
                 serializeJSONObject((JSONObject) value, sb, depth + 1, config);
-            } else if (value instanceof JSONArray) {
+                return;
+            case D_JSON_ARRAY:
                 serializeJSONArray((JSONArray) value, sb, depth + 1, config);
-            } else if (value instanceof Map) {
+                return;
+            case D_MAP:
                 serializeMap((Map<?, ?>) value, sb, depth + 1, config);
-            } else if (value instanceof Collection) {
+                return;
+            case D_COLLECTION:
                 serializeCollection((Collection<?>) value, sb, depth + 1, config);
-            } else if (value.getClass().isArray()) {
+                return;
+            case D_ARRAY:
                 serializeArray(value, sb, depth + 1, config);
-            } else {
+                return;
+            default:
                 // Java bean — reflect fields
                 serializeBean(value, sb, depth + 1, config);
-            }
         }
     }
 
@@ -413,6 +503,11 @@ public final class JSONSerializer {
     }
 
     private static void serializeBean(Object bean, StringBuilder sb, int depth, DingJsonConfig config) {
+        com.dingjson.codec.DingJsonCodec<Object> codec = codecOf(bean.getClass());
+        if (codec != null) {
+            codec.write(bean, sb, depth, config);
+            return;
+        }
         sb.append('{');
         boolean first = true;
         boolean skipNulls = config != null && !config.writeNullFields();
@@ -530,7 +625,7 @@ public final class JSONSerializer {
             new ConcurrentHashMap<>();
 
     /** Thread-safe per-pattern formatter (unlike SimpleDateFormat, which needs a ThreadLocal). */
-    private static java.time.format.DateTimeFormatter dateFormatter(String pattern) {
+    static java.time.format.DateTimeFormatter dateFormatter(String pattern) {
         return DATE_FORMATS.computeIfAbsent(pattern,
                 p -> java.time.format.DateTimeFormatter.ofPattern(p)
                         .withZone(java.time.ZoneId.systemDefault()));
@@ -542,7 +637,7 @@ public final class JSONSerializer {
      * default zone, date-time patterns to that instant, offsets as given.
      * Unlike SimpleDateFormat this is strict (no 2023-02-30 → March rollover).
      */
-    private static java.util.Date parseDate(String text, java.time.format.DateTimeFormatter fmt) {
+    static java.util.Date parseDate(String text, java.time.format.DateTimeFormatter fmt) {
         java.time.temporal.TemporalAccessor ta = fmt.parse(text);
         java.time.ZoneId zone = java.time.ZoneId.systemDefault();
         java.time.Instant instant;
@@ -1274,14 +1369,26 @@ public final class JSONSerializer {
     }
 
     /** Instantiates the target bean and maps fields (generic-aware). */
+    @SuppressWarnings("unchecked")
     private static <T> T deserializeBean(JSONObject source, Class<T> targetType) {
+        com.dingjson.codec.DingJsonCodec<Object> codec = codecOf(targetType);
+        if (codec != null) {
+            return (T) codec.read(source, null);
+        }
         try {
             T instance = newInstanceOf(targetType);
             for (FieldInfo f : fieldsOf(targetType)) {
                 if (!f.deserializable) continue;
                 if (!source.containsKey(f.jsonName)) continue;
                 Object raw = source.get(f.jsonName);
-                Object typed = deserialize(raw, f.field.getGenericType());
+                Object typed;
+                if (raw instanceof String && f.format.length() > 0 && f.type == Date.class) {
+                    // Same as the streaming path: honour @JSONField(format) so a
+                    // bean the writer produced can be read back.
+                    typed = parseDate((String) raw, dateFormatter(f.format));
+                } else {
+                    typed = deserialize(raw, f.field.getGenericType());
+                }
                 if (typed != null || raw == null) {
                     putField(instance, f, typed);
                 }

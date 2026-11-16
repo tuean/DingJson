@@ -136,6 +136,12 @@
                     <source>8</source>
                     <target>8</target>
                     <encoding>UTF-8</encoding>
+                    <!-- JDK 23+ no longer runs processors found on the classpath by
+                         default; the DingJson codec processor must run for beans
+                         annotated with @DingJsonSerializable. -->
+                    <compilerArgs>
+                        <arg>-proc:full</arg>
+                    </compilerArgs>
                 </configuration>
             </plugin>
 

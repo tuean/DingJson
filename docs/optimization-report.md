@@ -70,10 +70,46 @@
 - 每次解析都会把输入 `String` 复制成 `char[]`（`String.toCharArray`，约 2N 字节）。这是所有扫描器零分支访问的前提，暂时接受。
 - `parse(InputStream)` 路径是 `BAOS → byte[] → String → char[]`，小文档无所谓，超大流可以后续优化。
 
+## 编译期 codec（注解处理器）
+
+运行期能省的都省完之后，剩下的开销只有反射本身：每个字段一次 `FieldInfo` 查表、
+一次 `kind` 分派、一次 Unsafe 读。要彻底去掉它，只能把这段代码在**编译期**生成出来。
+
+`@DingJsonSerializable` → `DingJsonCodecProcessor`（`AbstractProcessor`）为每个类生成
+`<BinaryName>$$DingJsonCodec`：`write()` 是一条直线（`out.append(KEY_x).append(b.x)`），
+`read()` 是一串 `if (src.containsKey("x")) b.x = ...`。运行期 `JSONSerializer.codecOf()`
+用 `ClassValue` 按需 `Class.forName(binary + "$$DingJsonCodec")`，找不到就静默回退反射。
+
+代价是 `javax.annotation.processing` 在 `java.compiler` 模块里，属于**零依赖**范围内；
+生成的是普通 Java 源码而非字节码，因此不需要自带 classfile 写入器（这正是不走 ASM 的原因）。
+
+实测（同一次 JVM 内两个同形类对跑，一个带 codec 一个不带，避免机器负载漂移）：
+
+| 场景 | 反射 | codec | 比值 |
+|---|---|---|---|
+| serialize bean（15 字段，含 Date/List/嵌套） | 0.45–0.71 μs | 0.39–0.65 μs | 1.05–1.15x |
+| serialize list100 | 46.6–65.7 μs | 40.8–51.0 μs | **1.20x** |
+| read bean（树路径） | 2.77–3.14 μs | 2.60–2.96 μs | 1.03–1.08x |
+
+分配量不变：反射路径在 A~F 之后已经做到"每字段零分配"（key、构造器、offset 都缓存了），
+codec 省的是**分派**不是**分配**，所以收益集中在 CPU，不在 GC。这也解释了为什么
+100 个 bean 的批量场景比单 bean 明显 —— 分派开销是每次调用都要付的。
+
+安全阀：
+
+- 生成失败（`private`/`final` 字段、泛型类、抽象类、跨包不可见）只发一条 NOTE 并回退反射，
+  **绝不阻断用户构建**；`DingJsonCodecProcessorTest` 用真实 javac 覆盖了这条路
+- 输出必须与原路径逐字节相同：`CodecGenerationTest` 用一对同形类（一个注解、一个不注解）
+  逐字节比对紧凑输出、`writeNullFields(false)`、容器内嵌套、NaN/Infinity、HTML 转义
+- `-Ddingjson.codec.disabled=true` 可整体关闭（排查"是不是 codec 的锅"）
+
+顺带修掉一个旧 bug：树路径（`parseObject(text, TypeReference)`）此前不认
+`@JSONField(format)`，写得出却读不回；现在与流式路径一致。
+
 ## 验证
 
 ```
 mvn -o test
-  injection           492 tests, 0 failures   (Unsafe 字段访问)
-  reflection-fallback 492 tests, 0 failures   (纯反射)
+  injection           504 tests, 0 failures   (Unsafe 字段访问)
+  reflection-fallback 504 tests, 0 failures   (纯反射)
 ```

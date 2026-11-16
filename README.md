@@ -137,6 +137,29 @@ public class User {
 }
 ```
 
+### 编译期 codec（可选，免反射）
+
+给类加 `@DingJsonSerializable`，注解处理器会生成 `<类名>$$DingJsonCodec`，
+序列化/反序列化改走生成的直线代码（无反射查表、无 `instanceof` 分派）：
+
+```java
+@DingJsonSerializable
+public class User {
+    public int id;
+    public String name;
+}
+
+DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用它
+```
+
+- 字段需对生成的类可见（`public`，或声明在与类同包）；`private`/`final` 字段、
+  泛型类、抽象类会**编译期给一条 NOTE 并退回反射**，绝不阻断构建
+- 输出与原反射路径**逐字节相同**（HTML 转义、`@JSONField(name/serialize/format)`、
+  `writeNullFields`、日期格式全部一致，测试逐字节比对）
+- 关闭：`-Ddingjson.codec.disabled=true`；JDK 23+ 需要 `-proc:full`（本项目 `pom.xml` 已加）
+- 收益有限但真实：bean 序列化 1.05–1.2x、树路径反序列化约 1.05x
+  —— 反射路径此前已做过 key 预引用、构造器缓存与 Unsafe 直访
+
 ## 内置 JDK 类型支持
 
 | 类型 | 序列化 | 反序列化 |
