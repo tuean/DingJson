@@ -187,6 +187,13 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 - **控制字符**：字符串内裸控制字符按 RFC 8259 拒绝
 - **合规背书**：JSONTestSuite 318 用例 100% 通过
 
+## 文档
+
+- [使用文档](docs/usage.md) —— 全部公开 API 与用法
+- [技术架构](docs/architecture.md) —— 设计取舍、核心处理逻辑、代码地图
+- [优化报告](docs/optimization-report.md) —— 每项优化的实测前后对比
+- [基准测试](BENCHMARK.md) / [变更记录](CHANGELOG.md)
+
 ## 性能（JDK 25，详见 [BENCHMARK.md](BENCHMARK.md)）
 
 | 场景 | DingJson | fastjson2 | Jackson | Gson | org.json |
@@ -213,7 +220,7 @@ Java 8+，无传递依赖。
 
 ```bash
 mvn clean package      # 单元测试 + 合规测试 + Checkstyle
-mvn test              # 488 个测试 + JSONTestSuite 318 用例
+mvn test              # 508 个测试 + JSONTestSuite 318 用例
 ```
 
 ## JPMS 说明
