@@ -8,6 +8,7 @@ import com.dingjson.parser.JSONParser;
 import com.dingjson.parser.JSONReader;
 
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Modifier;
@@ -64,6 +65,32 @@ public final class JSONSerializer {
     };
 
     /**
+     * Zero-argument constructors, looked up once per class: bean instantiation
+     * runs per parsed instance, and {@code getDeclaredConstructor()} resolves
+     * the method through reflection every time.
+     */
+    private static final ClassValue<Constructor<?>> CTOR_CACHE = new ClassValue<Constructor<?>>() {
+        @Override
+        protected Constructor<?> computeValue(Class<?> type) {
+            try {
+                return type.getDeclaredConstructor();
+            } catch (Throwable ignored) {
+                return null; // no accessible no-arg constructor: caller reports it
+            }
+        }
+    };
+
+    /** Instantiates a bean through the cached constructor (same failures as before). */
+    @SuppressWarnings("unchecked")
+    private static <T> T newInstanceOf(Class<T> type) throws ReflectiveOperationException {
+        Constructor<?> c = CTOR_CACHE.get(type);
+        if (c == null) {
+            throw new NoSuchMethodException(type.getName() + ".<init>()");
+        }
+        return (T) c.newInstance();
+    }
+
+    /**
      * A cached bean field with its {@link Unsafe} offset for direct access
      * (bytecode-level speed without generating classes).
      */
@@ -74,6 +101,7 @@ public final class JSONSerializer {
         final boolean serializable;   // @JSONField(serialize=false) skips output
         final boolean deserializable; // @JSONField(deserialize=false) skips input
         final String format;          // @JSONField(format) date pattern
+        final String key;             // prequoted "\"name\":" fragment, appended as one unit
         final Field field;          // fallback accessor
         final long offset;          // unsafe offset (valid when UnsafeFields.AVAILABLE)
         final int kind;             // precomputed primitive kind (see kindOf)
@@ -88,6 +116,13 @@ public final class JSONSerializer {
             this.serializable = jf == null || jf.serialize();
             this.deserializable = jf == null || jf.deserialize();
             this.format = jf != null ? jf.format() : "";
+            // Building the key once per class beats quoting it per instance per
+            // field: the hot loop then appends one constant string instead of
+            // '"' + name + "":".
+            StringBuilder kb = new StringBuilder(jsonName.length() + 4);
+            appendQuoted(kb, jsonName);
+            kb.append(':');
+            this.key = kb.toString();
             try {
                 field.setAccessible(true);
             } catch (Throwable ignored) {
@@ -395,8 +430,7 @@ public final class JSONSerializer {
             }
             if (!first) sb.append(',');
             first = false;
-            appendQuoted(sb, f.jsonName);
-            sb.append(':');
+            sb.append(f.key);
             writeFieldValue(bean, f, preRead, preReadValid, sb, depth, config);
         }
         sb.append('}');
@@ -708,8 +742,8 @@ public final class JSONSerializer {
             hasField = true;
             sb.append('\n');
             appendIndent(sb, indent + 2);
-            appendQuoted(sb, f.jsonName);
-            sb.append(": ");
+            sb.append(f.key);
+            sb.append(' ');
             writeFieldValue(bean, f, preRead, preReadValid, sb, depth, config);
             sb.append(',');
         }
@@ -991,7 +1025,7 @@ public final class JSONSerializer {
         }
         try {
             reader.readBeginObject();
-            T instance = targetType.getDeclaredConstructor().newInstance();
+            T instance = newInstanceOf(targetType);
             Map<String, FieldInfo> fields = fieldMap(targetType);
             boolean caseInsensitive = config != null && config.caseInsensitiveFields();
             int maxKeys = config != null ? config.maxObjectSize() : 0;
@@ -1242,7 +1276,7 @@ public final class JSONSerializer {
     /** Instantiates the target bean and maps fields (generic-aware). */
     private static <T> T deserializeBean(JSONObject source, Class<T> targetType) {
         try {
-            T instance = targetType.getDeclaredConstructor().newInstance();
+            T instance = newInstanceOf(targetType);
             for (FieldInfo f : fieldsOf(targetType)) {
                 if (!f.deserializable) continue;
                 if (!source.containsKey(f.jsonName)) continue;
