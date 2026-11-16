@@ -193,6 +193,7 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 - [技术架构](docs/architecture.md) —— 设计取舍、核心处理逻辑、代码地图
 - [优化报告](docs/optimization-report.md) —— 每项优化的实测前后对比
 - [基准测试](BENCHMARK.md) / [变更记录](CHANGELOG.md)
+- [发布流程](docs/publishing.md) —— 发布到 Maven Central 与排错
 - 自己跑基准：`./bench.sh`（横向对比）/ `./bench.sh ab <旧版本 classes>`（同 JVM A/B）
 
 ## 性能（JDK 25，详见 [BENCHMARK.md](BENCHMARK.md)）
@@ -212,11 +213,15 @@ DingJson.toJSONString(user);   // 首次使用时发现 codec，之后一直用�
 
 ```xml
 <dependency>
-    <groupId>com.dingjson</groupId>
+    <groupId>io.github.tuean</groupId>
     <artifactId>dingjson</artifactId>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
 </dependency>
 ```
+
+> 1.1.0 是首次发布版本，Portal 点击 Publish 后约 2 小时同步到 `repo1.maven.org`。
+> 确认可拉：`curl -sI https://repo1.maven.org/maven2/io/github/tuean/dingjson/1.1.0/dingjson-1.1.0.jar`
+> （200 = 已可用；在此之前请克隆源码 `mvn -o install`）。发布流程见 [docs/publishing.md](docs/publishing.md)。
 
 Java 8+，无传递依赖。
 

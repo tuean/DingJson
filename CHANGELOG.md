@@ -2,7 +2,10 @@
 
 All notable changes to DingJson are documented here.
 
-## [1.1.0] — 未发布（编译器 / 运行期优化）
+## [1.1.0] — 2026-11-16
+
+首次公开发布：`io.github.tuean:dingjson`（Maven Central）。1.0.1 的内容一并并入本版本，
+**1.0.1 未单独发布过**。
 
 ### Performance
 相对 1.0.0 的同 JVM A/B 实测（`BENCHMARK.md` 第 1 节，ns/op 越低越好）：
@@ -18,6 +21,15 @@ All notable changes to DingJson are documented here.
 
 横向：`parse` 从第 4 升到**第 2**，100k 数组解析**第 1**，`bean-list` 第 5 → 第 2，
 `serialize` 仍第 4，`readIntArray` 绝对领先（1,438 ops/sec）。
+
+### Build / 发布
+- 首次发布到 Maven Central：坐标 `io.github.tuean:dingjson`（groupId 由 `com.dingjson`
+  改为 `io.github.tuean`，走 GitHub namespace 自动验证，不需要域名）
+- 发布链路从已关停的 OSSRH（`nexus-staging-maven-plugin` + `s01.oss.sonatype.org`）
+  迁到 Central Publisher Portal（`central-publishing-maven-plugin` 0.8.0，
+  `autoPublish=false` 保留人工确认；`distributionManagement` 删除）
+- `maven-javadoc-plugin` 3.6.0 → 3.11.2（3.6.0 在 JDK 25 上跑不动）
+- 新增 `docs/publishing.md`（发布步骤与排错）与 `tools/settings-central.xml.example`
 
 ### Added
 - **编译期 codec 生成**：给类加 `@DingJsonSerializable`，注解处理器生成
@@ -35,7 +47,7 @@ All notable changes to DingJson are documented here.
   `Date` + `@JSONField(format = "yyyy-MM-dd")` 时抛 `NumberFormatException`
   （`Long.parseLong("2025-01-01")`），写得出却读不回；现在与流式路径一致
 
-## [1.0.1] — 2026-11-16 (安全审计修复)
+## [1.0.1] — 2026-11-16 (安全审计修复，未单独发布)
 
 ### Performance
 无变化：本轮只改错误路径与类型校验，快路径唯一改动是 `readScalar` 的
